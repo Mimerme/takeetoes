@@ -1,0 +1,17 @@
+[package]
+name = "takeetoes"
+version = "0.1.0"
+authors = ["mimerme"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+argparse = "0.2.2"
+igd = "0.11.1"
+derive-new = "0.5"
+
+
+[[bin]]
+name = "node"
+path="src/takeetoe.rs"
