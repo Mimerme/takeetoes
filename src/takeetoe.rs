@@ -3,7 +3,7 @@ extern crate igd;
 #[macro_use]
 extern crate derive_new;
 
-use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4, SocketAddr};
+use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4, SocketAddr, IpAddr};
 use std::io::Result;
 use std::io::{self, Read, Write};
 use argparse::{ArgumentParser, StoreTrue, Store, StoreOption, StoreFalse};
@@ -155,7 +155,7 @@ fn main() -> Result<()>{
     //              |         |    //                        |
 
 
-   let mut peers : Arc<RwLock<HashMap<String, (Mutex<Sender<Vec<u8>>>, Mutex<Receiver<u8>>)>>> = Arc::new(RwLock::new(HashMap::new()));
+   let mut peers : Arc<RwLock<HashMap<SocketAddr, (Mutex<Sender<Vec<u8>>>, Mutex<Receiver<u8>>)>>> = Arc::new(RwLock::new(HashMap::new()));
 
    //let peer_list = vec![];
    //If a connecting_ip is specified then establish a connection and retrieve the peer list
@@ -164,7 +164,8 @@ fn main() -> Result<()>{
         let mut network_header : Vec<u8> = vec![0; 2];
 
         //Begin asking for the network's peer list
-        stream.write(&[1, 0])?;
+        //[opcode (1), data_length (6), ip : port]
+        stream.write(&[1, 6])?;
         //Get the OpCode and Data Length
         stream.read(&mut network_header);
         
@@ -181,7 +182,7 @@ fn main() -> Result<()>{
             let mut stream = TcpStream::connect(peer_addr).unwrap(); 
             let (read, send) = spawn_connection_thread(stream).unwrap();
             peers.write().unwrap().insert(
-                peer_addr.to_string(),
+                peer_addr,
                 (Mutex::new(send), Mutex::new(read))
             );
         }
@@ -197,11 +198,38 @@ fn main() -> Result<()>{
         loop{
             for (string_ip, (send, recv)) in peers_clone.read().unwrap().iter() {
                 //send.lock().unwrap().send(b"asaaa".to_vec());
-                match recv.lock().unwrap().try_recv() {
+                let recv = recv.lock().unwrap();
+                match recv.try_recv() {
                     Ok(data) => {
                         //Check for the opcode of the data first
                         match data {
+                            0x01 => {
+                                if verbose { println!("{} requested the peer list", string_ip);}
+                                //TODO: this might be too slow xd, but it's easier to Google this
+                                //stuff xd
+                                let peers = peers_clone.read().unwrap();
+                                let send = send.lock().unwrap();
+                                if verbose { println!("{:?}", peers.keys());}
 
+                                for peer in peers.keys() {
+                                    let mut ip = match peer.ip() {
+                                        IpAddr::V4(ip) => ip.octets().to_vec(),
+                                        IpAddr::V6(ip) => panic!("Protocol currently doesn't support ipv6 :("),
+                                    };
+                                    let port : u16 = peer.port();
+                                    ip.push((port >> 8) as u8);
+                                    ip.push(port as u8);
+                                    send.send(ip);
+                                }
+//                                //Get the length of the data
+//                                let len = recv.recv().unwrap() as usize;
+//
+//                                for x in 0..len {
+//                                    
+//                                }
+                                println!("Responded with peer list");
+                            },
+                            _ => {}
                         }
 
 
@@ -224,7 +252,7 @@ fn main() -> Result<()>{
        //Add to the peer list
        let (read, send) = spawn_connection_thread(tcp_connection).unwrap();
        peers.write().unwrap().insert(
-            peer_addr.to_string(),
+            peer_addr,
             (Mutex::new(send), Mutex::new(read))
        );
    }
