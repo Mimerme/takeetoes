@@ -3,130 +3,69 @@ extern crate igd;
 #[macro_use]
 extern crate derive_new;
 
-use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4};
+use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4, SocketAddr};
 use std::io::Result;
 use std::io::{self, Read, Write};
-use std::thread;
 use argparse::{ArgumentParser, StoreTrue, Store, StoreOption, StoreFalse};
-use std::convert::AsRef;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc;
+use std::ops::{Deref, DerefMut};
 use std::collections::{HashSet, HashMap};
+use std::{thread, time};
+use derefable::Derefable;
+use std::boxed::Box;
 
-#[derive(new)]
-pub struct TakeetoeNode
+//Given a TcpStream...
+//...spawn a new thread to handle reads and writes
+//...returns a tuple of a Sender and Receiver to write and read to the stream
+fn spawn_connection_thread(mut tcp_connection: TcpStream) -> Result<(Receiver<u8>, Sender<Vec<u8>>)> 
 {
-    //pub connections: Vec<&'a TcpStream>,
-    pub total_str: String,
-    pub local_addr: String,
-    pub local_port: u16,
-    pub verbose: bool,
-    #[new(default)]
-    //A vector that contains both the peers and their corresponding mspc channels
-    pub tcp_peers : HashMap<String, Sender<Vec<u8>>>,
-}
+    //Start a new thread to handle each TCPStream
+    //Create a channel that'll be hared across multiple threads
+    let (send_out, recv_out) = mpsc::channel::<Vec<u8>>();
+    let (send_in, recv_in) = mpsc::channel::<u8>();
+    let conn_addr = tcp_connection.peer_addr().unwrap().to_string();   
 
-impl NodeProtocol for TakeetoeProtocol {
-    fn handle(&mut self, data : u8) -> Vec<u8> {
-        print!("{} Peers: {}", data as char, self.peer_list.read().unwrap().len());
+    thread::spawn(move || {
+        tcp_connection.set_nonblocking(true).expect("failed to set tcp_connection as nonblocking");
+        let mut byte_buff: Vec<u8> = vec![0; 1];
 
-        //if data == 0x01
-
-        for peer in self.peer_list.read().unwrap().iter() {
-            //OpCode (1-byte)
-            //1 (SYNC_PEERS) | # of peers (1-byte) | ip and port (6-bytes)
-
-        //   println!("{:?}", peer);
-            let mut conn = peer.write().unwrap();
-           conn.write(b"hello");
-           conn.write(&vec![data]);
-        }
-        return vec![];
-    }
-}
-
-
-impl TakeetoeNode
-    {
-    //Start the node and begin listening and responding to connections
-    //Register a function that defines and handles the network protcol
-    // Protocol reads in every byte and returns the output to the client
-    // peer_list is automatically shared and reference counted between threads
-    pub fn start(&mut self) -> Result<()>
-    {
-        //Begin the INTRO phase (getting a peer list from one node)
-        //First connect to the origin peer and get the peer_list
-        let origin_peer = TcpStream::connect();
-
-        //Connect to each of the peer lists, and populate self.tcp_peers accordingly
-
-        //Start the server
-        let mut listener = TcpListener::bind(self.total_str.clone())?;
-
-        //Accept every incomming TCP connection on the main thread
-        for stream in listener.incoming() {
-            println!("New connection");
-            //Stream ownership is passed to the thread
-            let mut tcp_connection: TcpStream = stream.unwrap();
-            self.handle_connection(tcp_connection)
-        }
-
-        return Ok(());
-    }
-
-    //Spawn a new thread to handle the connection
-    //Stores the 'Sender' end of the channel in self.peer_list
-    pub fn handle_connection(&mut self, tcp_connection: TcpStream){
-        //Start a new thread to handle each TCPStream
-        //Create a channel that'll be hared across multiple threads
-        let (send, recv) = mspc::channel();
-        
-        //Add to the peer list before ownership is lost
-        self.tcp_peers.insert(
-            tcp_connection.peer_addr().unwrap().to_string(),
-            send
-        );
-
-        thread::spawn(move || {
-            tcp_connection.set_nonblocking(true).except("failed to set tcp_connection as nonblocking");
-            let mut byte_buff: [u8; 1] = [0;1];
-            let mut total_buff = vec![];
-
-            //Main event loop
-            //on each iteration...
-            //  read in a byte, see if it matches a command, if so follow the protocol
-            //  handle an incomming 'write' messages on the 'recv' end of the channel if exists
-            loop {
-                //Read in a byte at a time until a command is recognized
-                match tcp_connection.read(&byte_buff) {
-                    //EOF: 'num_bytes_read' == 0
-                    Ok(num_bytes_read) => {total_buff.push(byte_buff[0]);},
-                    //io:ErrorKind::WouldBlock: in this case means that no bytes received
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {continue;},
-                    Err(e) => panic!()
-                }
-
-                println!("{}", total_buff);
-
-                //Then handle all incomming channels
-                match recv.try_recv() {
-                    Ok(write_data) => tcp_connection.write(&write_data),
-                    //try_recv returns an error on no data or disconnected
-                    //https://doc.rust-lang.org/std/sync/mpsc/enum.TryRecvError.html
-                    Err(e) => continue
-                }
-
+        //Main event loop
+        //on each iteration...
+        //  read in a byte, see if it matches a command, if so follow the protocol
+        //  handle an incomming 'write' messages on the 'recv' end of the channel if exists
+        loop {
+            //Read in a byte at a time until a command is recognized
+            match tcp_connection.read(&mut byte_buff) {
+                //EOF: 'num_bytes_read' == 0
+                Ok(num_bytes_read) => {
+                    if num_bytes_read == 1 {
+                        send_in.send(byte_buff[0]);
+                    }
+                },
+                //io:ErrorKind::WouldBlock: in this case means that no bytes received
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {},
+                Err(e) => panic!()
             }
-        });
-    }
 
-    //Broadcast a message to all nodes on the network
-    pub fn broadcast(&self, message: Vec<u8>){
-       for peer_id, send_chan in self.tcp_peers {
-            send_chan.send(message);
-       }
-    }
+            //Then handle all incomming channels and write it to the TCPStream
+            match recv_out.try_recv() {
+                Ok(write_data) => {tcp_connection.write(&write_data);},
+                //try_recv returns an error on no data or disconnected
+                //https://doc.rust-lang.org/std/sync/mpsc/enum.TryRecvError.html
+                Err(e) => {}
+            }
+
+        }
+    });
+
+    return Ok((
+        recv_in,
+        send_out
+    ));
 }
+
 
 fn main() -> Result<()>{
     let mut connections : Vec<TcpStream> = vec![];
@@ -191,26 +130,104 @@ fn main() -> Result<()>{
         }
    }
 
-    
+    //Network Protocol
+    //OpCode | Data Length | Data
+    //1 byte | 1 byte      | <Data Length> byte
+
+    // |__new peer__|         |___intro peer___|
+    // |            |\        |
+    //              | \       |
+    //              |INTRO    |
+    //   1 (1b) | 6 (1b) | advertised_ ip (6b)
+    //              |     \   |
+    //              |      \  |
+    //              |       \ |
+    //              |        \|
+    //              |         | 
+    //              |        /|
+    //              |INTRO_RES|
+    //   1 (1b) | 0..252 (1b) | peer_ip : peer_port + ... (0..252b)
+    //'new_peer' now connects to each peer, thus adding itself to each node's peer_list 
+    //              |   /     |
+    //              |  /      |
+    //              | /       |
+    //              |/        |
+    //              |         |    //                        |
+
+
+   let mut peers : Arc<RwLock<HashMap<String, (Mutex<Sender<Vec<u8>>>, Mutex<Receiver<u8>>)>>> = Arc::new(RwLock::new(HashMap::new()));
+
    //let peer_list = vec![];
    //If a connecting_ip is specified then establish a connection and retrieve the peer list
    if connecting_ip != "0.0.0.0:0" {
         let mut stream = TcpStream::connect(connecting_ip)?;
-
+        let mut network_header : Vec<u8> = vec![0; 2];
 
         //Begin asking for the network's peer list
-        stream.write(&[1])?;
-        //Get the # of peers
-        //stream.read();
+        stream.write(&[1, 0])?;
+        //Get the OpCode and Data Length
+        stream.read(&mut network_header);
+        
+        //Format is in:
+        //ip1 (4 bytes) | port1 (2 bytes) | ip2 ...  
+        let mut peer_data : Vec<u8> = vec![0; network_header[1].into()];
+        stream.read(&mut peer_data);
 
-        // Connect to each of the specified peers as well
-
+        // Connect to each of the specified peers
+        for start in (0..network_header[1].into()).step_by(6) {
+            //https://stackoverflow.com/questions/50243866/how-do-i-convert-two-u8-primitives-into-a-u16-primitive?noredirect=1&lq=1
+            let port_number : u16 = ((peer_data[start + 4] as u16) << 8) | peer_data[start + 5] as u16;
+            let peer_addr = SocketAddr::from(([peer_data[start], peer_data[start + 1], peer_data[start + 2], peer_data[start + 3]], port_number));
+            let mut stream = TcpStream::connect(peer_addr).unwrap(); 
+            let (read, send) = spawn_connection_thread(stream).unwrap();
+            peers.write().unwrap().insert(
+                peer_addr.to_string(),
+                (Mutex::new(send), Mutex::new(read))
+            );
+        }
    }
 
-    //let handler : TakeetoeProtocol = TakeetoeProtocol::new();
-    let mut node = TakeetoeNode::new(binding_ip.clone(), local_addr.to_string(), local_port, true);
-    //let eff = handler.as_ref().map(TakeetoeHandler::handle);
-    node.start(TakeetoeProtocol::new);
+
+   //Start the server
+   let mut listener = TcpListener::bind(binding_ip)?;
+   let mut peers_clone = Arc::clone(&peers);
+
+   //Thread to run the main event loop / protocol
+   thread::spawn(move || {
+        loop{
+            for (string_ip, (send, recv)) in peers_clone.read().unwrap().iter() {
+                //send.lock().unwrap().send(b"asaaa".to_vec());
+                match recv.lock().unwrap().try_recv() {
+                    Ok(data) => {
+                        //Check for the opcode of the data first
+                        match data {
+
+                        }
+
+
+
+                        println!("{:?}", data);
+                    },
+                    Err(_) => {}
+                }
+            }
+       }
+   });
+
+   //Accept every incomming TCP connection on the main thread
+   for stream in listener.incoming() {
+       println!("New connection");
+       //Stream ownership is passed to the thread
+       let mut tcp_connection: TcpStream = stream.unwrap();
+       let peer_addr = tcp_connection.peer_addr().unwrap();
+
+       //Add to the peer list
+       let (read, send) = spawn_connection_thread(tcp_connection).unwrap();
+       peers.write().unwrap().insert(
+            peer_addr.to_string(),
+            (Mutex::new(send), Mutex::new(read))
+       );
+   }
 
     return Ok(());
 }
