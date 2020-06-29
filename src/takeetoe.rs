@@ -46,7 +46,7 @@ const PONG : u8 = 0x07;         //response to a PING with PONG
 //Given a TcpStream...
 //...spawn a new thread to handle reads and writes
 //...returns a tuple of a Sender and Receiver to write and read to the stream
-fn spawn_connection_thread(mut tcp_connection: TcpStream, sleep_dur : Duration) -> Result<(Receiver<u8>, Sender<Vec<u8>>)> 
+fn handle_connection(mut tcp_connection: TcpStream, sleep_dur : Duration) -> Result<(Receiver<u8>, Sender<Vec<u8>>)> 
 {
     //Start a new thread to handle each TCPStream
     //Create a channel that'll be hared across multiple threads
@@ -93,6 +93,45 @@ fn spawn_connection_thread(mut tcp_connection: TcpStream, sleep_dur : Duration) 
         recv_in,
         send_out
     ));
+}
+
+//Send a command to a TCPStream
+fn send_command(opcode : u8, data_len : u8, &data : Vec<u8>, connection : &mut TcpStream)->Result<(), string>{
+     //Add the headers to the outgoing data
+     data.insert(0, data_len);
+     data.insert(0, opcode);
+     connection.write_all(data);
+     return Ok(());
+}
+
+fn recv_command(connection : &mut TcpStream, block bool)->Result<(u8, u8, [u8], String)>{
+    let network_header = vec![0;2];
+    // Keep peeking until we have a network header in the connection stream
+
+    loop{
+        //Block until an entire command is received
+        if block {
+            while connection.peek(&mut network_header) < network_header.len(){}
+            let data_len = network_header[1].into();
+            let command = vec![0; data_len + 2];
+
+            connection.read_exact(&command);
+            return Ok((command[0], data_len, command[2..(data_len + 2)]));
+        }
+        //Do not block until an entire command is **ready** to be received
+        else {
+            if connection.peek(&mut network_header) < network_header.len() {
+                return Err("would_block");
+            }
+            let data_len = network_header[1].into();
+            let command = vec![0; data_len + 2];
+            if connection.peek(&mut command) < command.len() {
+                return Err("would_block");
+            }
+            connection.read_exact();
+            return Ok((command[0], data_len, command[2..(data_len + 2)]));
+        }
+    }
 }
 
 
@@ -155,13 +194,10 @@ fn main() -> Result<()>{
    let conn_loop_delay = time::Duration::from_millis(conn_loop_delay.parse::<u64>().unwrap());
    let event_loop_delay = time::Duration::from_millis(event_loop_delay.parse::<u64>().unwrap());
 
-   println!("Binding Addr: {}", &binding_ip);
-   println!("Connecting Addr: {}", &connecting_ip);
-   let splits : Vec<&str> = binding_ip.split(':').collect();
-   let local_addr = splits[0];
-   let local_port = splits[1];
-   let local_port = local_port.parse::<u16>().unwrap();
-
+   if verbose {
+       println!("Binding Addr: {}", &binding_ip);
+       println!("Connecting Addr: {}", &connecting_ip);
+   }
 
    //unpnp code
    //TODO: doesn't work on WSL as of now. Try native later
@@ -221,18 +257,19 @@ fn main() -> Result<()>{
     //              |         |    //                        |
 
 
-
-   let mut peers : Arc<RwLock<HashMap<SocketAddr, (Mutex<Sender<Vec<u8>>>, Mutex<Receiver<u8>>)>>> = Arc::new(RwLock::new(HashMap::new()));
+   //Peer Vec Format
+   //(read: TcpStream, write: TcpStream, advertied_ip: SocketAddr)
+   let mut peers : Arc<RwLock<Vec<(Mutex<TcpStream>, Mutex<TcpStream>)>>> = Arc::new(RwLock::new(HashMap::new()));
    let mut peer_ads : Arc<RwLock<HashSet<SocketAddr>>> = Arc::new(RwLock::new(HashSet::new()));
 
-   //let peer_list = vec![];
    //If a connecting_ip is specified then establish a connection and retrieve the peer list
    if connecting_ip != "0.0.0.0:0" {
-        let c_ip_clone = connecting_ip.clone();
-        let mut stream = TcpStream::connect(connecting_ip)?;
+        //Connect to the stream
+        let mut stream = TcpStream::connect(connecting_ip.clone())?;
+        //Prepare a 2 byte buffer for the network header
         let mut network_header : Vec<u8> = vec![0; 2];
 
-        //Converting the argument into bytes
+        //Creating the 'advertised ip' by converting the cli argument into bytes
         let binding_sock = SocketAddr::from_str(&binding_ip).unwrap();
         let mut ip = match binding_sock.ip() {
             IpAddr::V4(ip) => ip.octets().to_vec(),
@@ -241,48 +278,31 @@ fn main() -> Result<()>{
         let port : u16 = binding_sock.port();
         ip.push((port >> 8) as u8);
         ip.push(port as u8);
- 
+
         //Begin asking for the network's peer list
-        //INTRO packet and an advertised peer list
-        //[opcode (1), data_length (6), ip : port]
+        //INTRO packet and an advertised peer list         
+        //[opcode (1), data_length (6), ip : port]        
+        send_command(INTRO, 6, &ip, &mut stream);
+        //Intro peer responds with peer list
+        let mut (res_op, res_len, res_data) = recv_command(&mut stream, true).unwrap();
+        if debug {println!("Respone: {:?}", (res_op, res_len, res_data));}
 
-        //If 'punch' opcode = 0x11
-        if punch {
-            stream.write(&[0x10 | INTRO, 6])?;
-        }
-        //Otherwise opcode = 0x01
-        else{
-            stream.write(&[INTRO, 6])?;
-        }
-        stream.write(&ip)?;
-        //Get the OpCode and Data Length
-        stream.read(&mut network_header);
-        println!("Data Len: {:?}", network_header[1]);
-
-
-        //Format is in:
+        //Peer List network format is in:
         //ip1 (4 bytes) | port1 (2 bytes) | ip2 ...  
-        let mut peer_data : Vec<u8> = vec![0; network_header[1].into()];
-        println!("{:?}", network_header[0] == INTRO);
-        //Read in the network peers
-        if network_header[1] != 0 {
-            stream.read_exact(&mut peer_data);
-        }
-
-        if ((network_header[0] != INTRO_RES) && (network_header[0] != (INTRO_RES | 0x10))){
-            println!("{:?}", network_header);
-            panic!("INTRO failed. Protocol out of order :(");
-        }
+        let mut peer_data = res_data;
+        
+        //if ((network_header[0] != INTRO_RES) && (network_header[0] != (INTRO_RES | 0x10))){
+        //    println!("{:?}", network_header);
+        //    panic!("INTRO failed. Protocol out of order :(");
+        //}
 
 
         //Add this initial connection to the peer list
-        let peer_addr = stream.peer_addr().unwrap();
-        let (read, send) = spawn_connection_thread(stream,conn_loop_delay).unwrap();
-        peers.write().unwrap().insert(
-            peer_addr,
-            (Mutex::new(send), Mutex::new(read)),
+        peers.write().unwrap().push(
+            Mutex::new(stream),
+            Mutex::new(stream.clone()),
         );
-        peer_ads.write().unwrap().insert(SocketAddr::from_str(&c_ip_clone).unwrap());
+        peer_ads.write().unwrap().insert(SocketAddr::from_str(&connecting_ip).unwrap());
  
         println!("Starting peer connections...");
         // Connect to each of the specified peers
@@ -300,24 +320,15 @@ fn main() -> Result<()>{
             //Connect to the specified peer
             println!("Peer: {:?}", peer_addr);
             let mut stream = TcpStream::connect(peer_addr).unwrap();
-            //Write the INTRO bytes
-            if punch {
-                stream.write(&[0x10 | INTRO, 6]);
-            }
-            else {
-                stream.write(&[INTRO, 6]);
-            }
-            stream.write(&ip);
+            
+            //Send an INTRO command to add node to peer list 
+            send_command(INTRO, 6, &ip, &mut stream);
             //Clear out the response. Lol, probably should do some verification here
-            let mut b_buf = vec![0;1];
-            stream.read_exact(&mut b_buf);
-            stream.read_exact(&mut b_buf);
-            stream.read_exact(&mut vec![0; b_buf[0].into()]);
+            let intro_res = recv_command(&mut stream, true);
 
-            let (read, send) = spawn_connection_thread(stream, conn_loop_delay).unwrap();
             peers.write().unwrap().insert(
-                peer_addr,
-                (Mutex::new(send), Mutex::new(read)),
+                Mutex::new(stream.clone()), 
+                Mutex::new(stream),
             );
             peer_ads.write().unwrap().insert(peer_addr);
         }
