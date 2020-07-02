@@ -2,6 +2,8 @@ extern crate argparse;
 extern crate igd;
 #[macro_use]
 extern crate derive_new;
+extern crate gitignore;
+extern crate hex_string;
 
 use std::time::Duration;
 use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4, SocketAddr, IpAddr};
@@ -15,85 +17,143 @@ use std::sync::mpsc;
 use std::ops::{Deref, DerefMut};
 use std::collections::{HashSet, HashMap};
 use std::{thread, time};
-use derefable::Derefable;
 use std::boxed::Box;
 use std::str::FromStr;
+use walkdir::WalkDir;
+use std::path::Path;
+use sha2::{Sha256, Sha512, Digest};
+//Some convenience functions for reading and writting to files
+use std::fs::{read_to_string, write};
+use std::fs::{metadata, File};
+use std::io::BufReader;
+use hex_string::HexString;
 
+//TakeetoeProtocol OpCodes
 const INTRO : u8 = 0x01;        //Used for introducing a new node to the network
 const INTRO_RES : u8 = 0x02;    //Used by network nodes to acknowledge INTRO
-const AD : u8 = 0x03;
+const AD : u8 = 0x03;           //Sent by a node to advertise its server, but doesn't expect a response
 const MSG : u8 = 0x04;          //A test message
 const PING : u8 = 0x06;         //PING a node
 const PONG : u8 = 0x07;         //response to a PING with PONG
 
+//File IO OpCodes
+//len = 128, <PROJ>(64) <FILE>(64)
+const PROJ : u8 = 0x08;         //Used for verifying project structures and file contents
+const PROJ_VER : u8 = 0x09;     //Used for responding to project and file verifications
+
 //Program Architecture
+// ===COMMAND FORMAT===
+// OpCode (1 byte) | Data Length <in bytes> (1 byte) | Data
+
+// 
+// send_command() -> give an opcode, datalength, and data write the bytes to a TcpStream
+// recv_command() -> given a TcpStream read a command from it (so at least 2 bytes + data length)
+//                   in either blocking or non-blocking mode
 // main() -> process program arguments 
 //        -> port forward if UNPnP
 //        -> create the main state of the Takeetoe node (Composed of Threads Safe (Sync/Send)) stuff
 //          -> List<Peer(in,out)>
 //          -> Advertising Peers
+//        -> Calculate the file & proj hash of the project directory
 //        -> connect to node if 'conecting_ip'
 //          -> ask intro node for peer list with INTRO
 //          -> intro node sends peer list with INTRO_RES
 //          -> connect to each peer in list with INTRO
 //              -> save each peer to 'Advertising Peers' as well
 //          -> discard the intro node response in INTRO_RES
-//              -> spawn_connection_thread() on the connection
-//              -> add Peer(in,out) to list
+//          -> send PROJ to 'connecting_ip'
+//          -> verify that PROJ_VER returns 1
+//          -> add Peer(in,out) to list
 //        -> if 'debug' start a debug shell that can interact with the node state on a seperate thread
-//        -> Start a new event loop that goes over List<Peer> and handles new data as it comes through peer.in
-//
-// spawn_connection_thread()
-//Given a TcpStream...
-//...spawn a new thread to handle reads and writes
-//...returns a tuple of a Sender and Receiver to write and read to the stream
-fn handle_connection(mut tcp_connection: TcpStream, sleep_dur : Duration) -> Result<(Receiver<u8>, Sender<Vec<u8>>)> 
-{
-    //Start a new thread to handle each TCPStream
-    //Create a channel that'll be hared across multiple threads
-    let (send_out, recv_out) = mpsc::channel::<Vec<u8>>();
-    let (send_in, recv_in) = mpsc::channel::<u8>();
-    let conn_addr = tcp_connection.peer_addr().unwrap().to_string();   
+//        -> Start a new event loop on a seperate thread that goes over List<Peer> and handles new data as it comes through peer.in
+//          -> TakeetoeProtocol
+//        -> Start a new thread that periodically pings the advertised peers
+//        -> On the main thread, start a loop that handles new connections and adds them to
+//           List<Peer>
 
-    thread::spawn(move || {
-        tcp_connection.set_nonblocking(true).expect("failed to set tcp_connection as nonblocking");
-        let mut byte_buff: Vec<u8> = vec![0; 1];
 
-        //Main event loop
-        //on each iteration...
-        //  read in a byte, see if it matches a command, if so follow the protocol
-        //  handle an incomming 'write' messages on the 'recv' end of the channel if exists
-        loop {
-            //Read in a byte at a time until a command is recognized
-            match tcp_connection.read(&mut byte_buff) {
-                //EOF: 'num_bytes_read' == 0
-                Ok(num_bytes_read) => {
-                    if num_bytes_read == 1 {
-                        send_in.send(byte_buff[0]);
-                    }
-                },
-                //io:ErrorKind::WouldBlock: in this case means that no bytes received
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {},
-                Err(e) => panic!()
-            }
 
-            //Then handle all incomming channels and write it to the TCPStream
-            match recv_out.try_recv() {
-                Ok(write_data) => {tcp_connection.write(&write_data);},
-                //try_recv returns an error on no data or disconnected
-                //https://doc.rust-lang.org/std/sync/mpsc/enum.TryRecvError.html
-                Err(e) => {}
-            }
+fn verify_file_hash(proj_hash : &Vec<u8>, file_hash : &Vec<u8>, mut peer_stream : &mut TcpStream) -> bool{
+      //Create the data vector to send
+      let mut data = proj_hash.clone();
+      data.extend(file_hash.clone());
 
-            thread::sleep(sleep_dur);
+      //Begin verifying the hash with the peer
+      println!("Verifying hash with {:?}...", data);
+      send_command(PROJ, 128, &data, &mut peer_stream);
+      let (opcode, len, data) = recv_command(&mut peer_stream, true).unwrap();
+      println!("PPO {:?}, {:?}, {:?}", opcode, len, data);
+      
+      if opcode != PROJ_VER || len != 1{
+          panic!("ERR: Protocol out-of-order");
+      }
 
+      //1 = verified
+      //0 = non-matching hashes
+      //2 = willing to syncronize
+      match data[0] {
+         0 => {return false;},
+         1 => {return true;},
+         2 => {
+            //Begin syncronization
+            panic!("File syncronization needs implementing");
+         },
+        _ => {
+            panic!("Protocol Err");
         }
-    });
+      }
+}
 
-    return Ok((
-        recv_in,
-        send_out
-    ));
+
+
+//Returns the structure and content hash
+fn get_directory_hash(project_dir : String, files :&mut HashMap<String, (String, String)>, output_files : bool) -> (Vec<u8>, Vec<u8>){
+
+     let mut proj_hasher = Sha512::new();
+     let mut file_hasher = Sha512::new();
+     let ignore = format!("{}/.gitignore", project_dir.clone());
+     let gitignore_path = Path::new(&ignore);
+
+     if !Path::exists(gitignore_path){
+        File::create(gitignore_path); 
+     }
+        
+     let git_ignore = gitignore::File::new(gitignore_path).unwrap();
+     let project_dir = &project_dir.clone();
+
+     println!("Project Directory: {:?}", project_dir);
+     println!("Loading the .gitignore file from: {:?}", gitignore_path);
+
+     //Get all the files that are not excluded by the .gitignore
+     let mut proj_iter = git_ignore.included_files().unwrap();
+     proj_iter.sort_by(|a, b| a.file_name().unwrap().cmp(b.file_name().unwrap()));
+
+     //for entry in WalkDir::new(&project_dir).sort_by(|a,b| a.file_name().cmp(b.file_name())) {
+     for entry in proj_iter.iter(){
+         //Remove the beginning /home/user/... stuff so project structures are the same across machines
+         //
+         //host_path refers to the local machine's path to the file
+         //net_path refers to the p2p network's identifier for the file
+         let host_path = entry.as_path().clone();
+         let net_path = host_path.strip_prefix(Path::new(project_dir)).expect("Error stripping the prefix of a project entry");
+         println!("Potential Network Entry: {:?}", &net_path);
+
+         //Update the project structure hash
+         proj_hasher.update(net_path.to_str().unwrap().as_bytes());
+
+         if metadata(host_path.clone()).unwrap().is_file() {
+            let file_contents = read_to_string(host_path.clone()).unwrap();
+            file_hasher.update(file_contents.as_bytes());
+
+            if output_files{
+                files.insert(net_path.to_str().unwrap().to_string(), (host_path.to_str().unwrap().to_string(), file_contents));
+            }
+         }
+
+     }
+     let proj_hash = proj_hasher.finalize();
+     let file_hash = file_hasher.finalize();
+     return (proj_hash.to_vec(), file_hash.to_vec());
 }
 
 //Send a command to a TCPStream
@@ -103,7 +163,7 @@ fn send_command(opcode : u8, data_len : u8, data : &Vec<u8>, connection : &mut T
      data.insert(0, data_len);
      data.insert(0, opcode);
      connection.write_all(&data);
-     println!("Sent command: {:?}", opcode);
+     println!("Sent command: {:?} {:?} {:?}", opcode, data_len, data);
      return Ok(());
 }
 
@@ -116,34 +176,36 @@ fn recv_command(connection : &mut TcpStream, block : bool)->Result<(u8, u8, Vec<
     //Block until an entire command is received
     if block {
         println!("Blocking...");
-        while connection.peek(&mut network_header).unwrap() <
-            network_header.len(){println!("What");println!("f: {:?}", network_header);}
-        println!("e: {:?}", network_header);
+        connection.read_exact(&mut network_header);
         let data_len : u8 = network_header[1];
         let dl_index : usize =  data_len.into();
-        let mut command = vec![0; dl_index + 2];
+        let mut command = vec![0; dl_index];
 
-        connection.read_exact(&mut command);
-        let data = &command[2..(dl_index + 2)];
-        return Ok((command[0], data_len, data.to_vec()));
+        println!("Waiting for data... {:?}", dl_index);
+        if data_len != 0 { 
+            connection.read_exact(&mut command);
+            return Ok((network_header[0], data_len, command));
+        }
+        else {
+            return Ok((network_header[0], 0, vec![]));
+        }
     }
     else {
         connection.set_nonblocking(true).expect("set_nonblocking failed");
-        
+
         if connection.peek(&mut network_header)? < network_header.len() {
-            println!("ERR");
             return Err(Error::new(ErrorKind::WouldBlock, "would block"));
         }
         let data_len : u8 = network_header[1];
         let dl_index : usize = data_len.into();
         let mut command = vec![0; dl_index + 2];
-        println!("NO BLOCK2");
+        println!("NO BLOCK2 {}", command.len());
         if connection.peek(&mut command)? < command.len() {
             println!("YYEEET");
             return Err(Error::new(ErrorKind::WouldBlock, "would block"));
         }
 
-        println!("READING EXACT");
+        //println!("READING EXACT");
         connection.read_exact(&mut command);
         return Ok((command[0], data_len, command[2..(dl_index + 2)].to_vec()));
     }
@@ -166,8 +228,8 @@ fn main() -> Result<()>{
     let mut event_loop_delay = "0".to_string();
     //Delay for both conn_loop_delay and event_loop_delay
     let mut delay = "0".to_string();
+    let mut project_dir = ".".to_string();
     //"0.0.0.0:0";
-    let mut verbose = false;
     let mut unpnp = false;
     let mut punch = false;
     let mut debug = false;
@@ -176,9 +238,6 @@ fn main() -> Result<()>{
         let mut parser = ArgumentParser::new();
         parser.set_description("Takeetoe Node");
 
-
-        parser.refer(&mut verbose)
-            .add_option(&["-v", "--verbose"], StoreTrue, "Enable verbose logging");
         parser.refer(&mut unpnp)
             .add_option(&["--upnp"], StoreTrue, "Use unpnp to automatically port forward (router must support it)");
         parser.refer(&mut debug)
@@ -197,6 +256,10 @@ fn main() -> Result<()>{
             .add_option(&["--event_delay"], Store, "The delay for the main event loop");
          parser.refer(&mut delay)
             .add_option(&["--delay"], Store, "Sets the value of '--event_delay' and '--conn_delay'");
+
+        parser.refer(&mut project_dir)
+            .add_option(&["-p", "--project_dir"], Store, "The project directory to syncronize");
+ 
         parser.parse_args_or_exit();
    
    }
@@ -209,7 +272,7 @@ fn main() -> Result<()>{
    let conn_loop_delay = time::Duration::from_millis(conn_loop_delay.parse::<u64>().unwrap());
    let event_loop_delay = time::Duration::from_millis(event_loop_delay.parse::<u64>().unwrap());
 
-   if verbose {
+   if debug {
        println!("Binding Addr: {}", &binding_ip);
        println!("Connecting Addr: {}", &connecting_ip);
    }
@@ -242,6 +305,29 @@ fn main() -> Result<()>{
         }
    }
 
+   //We verify project structure and file integrity with two seperate hashes
+   let mut files : HashMap<String, (String, String)> = HashMap::new();
+   let mut hashes : Arc<RwLock<(Vec<u8>, Vec<u8>)>> = Arc::new(RwLock::new((vec![], vec![])));
+
+   //Calculate the directory hash
+   let (proj_hash, file_hash) = get_directory_hash(project_dir.clone(), &mut files, true);
+   hashes.write().unwrap().0 = proj_hash.clone();
+   hashes.write().unwrap().1 = file_hash.clone();
+
+   if debug {
+      println!("PROJ HASH: {:?}", HexString::from_bytes(&proj_hash));
+      println!("FILE HASH: {:?}", HexString::from_bytes(&file_hash));
+   }
+
+   //Start the file IO thread
+   thread::spawn(move || {
+
+   });
+
+
+
+
+
     //Network Protocol
     //OpCode | Data Length | Data
     //1 byte | 1 byte      | <Data Length> byte
@@ -264,8 +350,11 @@ fn main() -> Result<()>{
     //              |  /      |
     //              | /       |
     //              |/        |
-    //  <--------INTRO to all peers------->                                    
+    //  <----------AD to all peers--------->      
     //              |         |
+    //              |         |
+    //  <------- PROJ to all peers-------->                                    
+    //   >-------PROJ_VER from all peers--------<                                    
     //              |         |
     //              |         |
     //              |         |
@@ -276,10 +365,12 @@ fn main() -> Result<()>{
    //(read: TcpStream, write: TcpStream, advertied_ip: SocketAddr)
    let mut peers : Arc<RwLock<Vec<(Mutex<TcpStream>, Mutex<TcpStream>)>>> =
        Arc::new(RwLock::new(vec![]));
-   let mut peer_ads : Arc<RwLock<HashSet<SocketAddr>>> = Arc::new(RwLock::new(HashSet::new()));
+   //<K,V> = <host_socket_add, net_socket_addr>
+   let mut peer_ads : Arc<RwLock<HashMap<SocketAddr, SocketAddr>>> = Arc::new(RwLock::new(HashMap::new()));
 
    //If a connecting_ip is specified then establish a connection and retrieve the peer list
    if connecting_ip != "0.0.0.0:0" {
+        if debug {println!("Connecting to {}...", connecting_ip);}
         //Connect to the stream
         let mut stream = TcpStream::connect(connecting_ip.clone())?;
         let mut stream_clone = stream.try_clone().unwrap();
@@ -289,7 +380,7 @@ fn main() -> Result<()>{
         let binding_sock = SocketAddr::from_str(&binding_ip).unwrap();
         let mut ip = match binding_sock.ip() {
             IpAddr::V4(ip) => ip.octets().to_vec(),
-            IpAddr::V6(ip) => panic!("Protocol currently doesn't support ipv6 :("),
+            IpAddr::V6(ip) => panic!("Protocol currently doesn't support ipv6 :(")
         };
         let port : u16 = binding_sock.port();
         ip.push((port >> 8) as u8);
@@ -297,24 +388,36 @@ fn main() -> Result<()>{
 
         //Begin asking for the network's peer list
         //INTRO packet and an advertised peer list         
-        //[opcode (1), data_length (6), ip : port]        
+        //[opcode (1), data_length (6), ip : port]
+        if debug {println!("Introducing IP {:?}", binding_sock);}
         send_command(INTRO, 6, &ip, &mut stream);
         //Intro peer responds with peer list
-        println!("PEE");
         let (mut res_op, mut res_len, mut res_data) = recv_command(&mut stream, true).unwrap();
+
         let mut peer_data = res_data.clone();
         if debug {println!("Response: {:?}", (res_op, res_len, res_data));}
 
         //Peer List network format is in:
         //ip1 (4 bytes) | port1 (2 bytes) | ip2 ...  
         
+
+        peer_ads.write().unwrap().insert(stream.peer_addr().unwrap(), SocketAddr::from_str(&connecting_ip).unwrap());
+        let proj_hash : &Vec<u8> = &hashes.read().unwrap().0.clone();
+        let file_hash : &Vec<u8> = &hashes.read().unwrap().1.clone();
+
+
+        println!("Hash Valid?: {:?}", verify_file_hash(proj_hash, file_hash, &mut stream));
+
+        if verify_file_hash(proj_hash, file_hash, &mut stream) == false {
+            panic!("Different filehash than into node");
+        }
+
         //Add this initial connection to the peer list
         peers.write().unwrap().push((
             Mutex::new(stream_clone),
             Mutex::new(stream)
         ));
-        peer_ads.write().unwrap().insert(SocketAddr::from_str(&connecting_ip).unwrap());
- 
+
         println!("Starting peer connections...");
         // Connect to each of the specified peers
         for start in (0..res_len.into()).step_by(6) {
@@ -333,16 +436,24 @@ fn main() -> Result<()>{
             println!("Peer: {:?}", peer_addr);
             let mut stream = TcpStream::connect(peer_addr).unwrap();
             
-            //Send an INTRO command to add node to peer list 
-            send_command(INTRO, 6, &ip, &mut stream);
             //Clear out the response. Lol, probably should do some verification here
-            let intro_res = recv_command(&mut stream, true);
+            //let intro_res = recv_command(&mut stream, true);
+            //send_command(AD, 6, &ip, &mut stream);
 
+            if verify_file_hash(proj_hash, file_hash, &mut stream) == false {
+                panic!("Different filehash than network");
+            }
+
+            //TODO: figure out why moving this line above verify_file_hash() results in a hang
+            //Send an AD command to add node to the network's peer list 
+            send_command(AD, 6, &ip, &mut stream);
+ 
+
+            peer_ads.write().unwrap().insert(stream.peer_addr().unwrap(), peer_addr);
             peers.write().unwrap().push((
                 Mutex::new(stream.try_clone().unwrap()), 
                 Mutex::new(stream),
             ));
-            peer_ads.write().unwrap().insert(peer_addr);
         }
 
         println!("Connected to all peers");
@@ -380,16 +491,38 @@ fn main() -> Result<()>{
                         send_command(MSG, data.len() as u8, &data, &mut write);
                     }
                 }
+                else if splits[0] == "peers" {
+                    println!(">>>Peer List<<<");
+                    for (host_ip, net_ip) in peer_ads_debug.read().unwrap().iter() {
+                        println!("Peer: {:?}, {:?}", host_ip, net_ip);
+                    }
+                }
             }
         });
    }
 
 
-   //Thread to run the main event loop / protocol
-   //This thread only deals with peers who have been learned 
+   //Start the peer watcher thread
    thread::spawn(move || {
         loop{
+            for (read, write) in peers_clone.read().unwrap().iter() {
+                
+            }
+        }        
+   });
+
+
+   let peers_clone = Arc::clone(&peers);
+   //Thread to run the main event loop / protocol
+   //This thread only deals with peers who have been learned / connected with
+   thread::spawn(move || {
+        let hashes = Arc::clone(&hashes);
+        let hash_cache : HashSet<(Vec<u8>, Vec<u8>)> = HashSet::new();
+
+        loop{
             //println!("{:?}", peers_clone.read().unwrap().iter().len());
+            let mut peer_index = 0;
+            //println!("{}", peers_clone.read().unwrap().iter().len());
             for (read, write) in peers_clone.read().unwrap().iter() {
                 //send.lock().unwrap().send(b"asaaa".to_vec());
                 let mut recv = read.lock().unwrap();
@@ -402,14 +535,15 @@ fn main() -> Result<()>{
                                 //if verbose { println!("{} requested the peer list", string_ip);}
                                 
                                 let peers = peers_clone.read().unwrap();
-                                let mut write = write.lock().unwrap();
+                                let wr = write;
+                                let mut write = wr.lock().unwrap();
                                 //if verbose { println!("{:?}", peer_ads.read().unwrap());}
                                
 
                                 let ad_ip_data = data;
                                 //Format 'peer_ads' into bytes
                                 let mut data = vec![];
-                                for peer in peer_ads.read().unwrap().iter() {
+                                for (_, peer) in peer_ads.read().unwrap().iter() {
                                     let mut ip = match peer.ip() {
                                         IpAddr::V4(ip) => ip.octets().to_vec(),
                                         IpAddr::V6(ip) => panic!("Protocol currently doesn't support ipv6 :("),
@@ -422,35 +556,66 @@ fn main() -> Result<()>{
 
                                 send_command(INTRO_RES, (peer_ads.read().unwrap().len() * 6) as u8,
                                 &data, &mut write);
-                                if verbose {println!("Responded with peer list");}
+                                if debug {println!("Responded with peer list");}
 
                                 let port_number : u16 = ((ad_ip_data[4] as u16) << 8) | ad_ip_data[5] as u16;
                                 let advertised_addr = SocketAddr::from(([ad_ip_data[0],
                                         ad_ip_data[1], ad_ip_data[2], ad_ip_data[3]], port_number));
 
-                                peer_ads.write().unwrap().insert(advertised_addr);
-                                if verbose {println!("Added {:?} to the peer_list", advertised_addr);}
+                                peer_ads.write().unwrap().insert(write.peer_addr().unwrap(), advertised_addr);
+                                if debug {println!("Added {:?} to the peer_list (INTRO)", advertised_addr);}
                             },
                             AD => {
+                                println!("SAVING AD");
                                 let ad_ip_data = data;
                                 let port_number : u16 = ((ad_ip_data[4] as u16) << 8) | ad_ip_data[5] as u16;
                                 let advertised_addr = SocketAddr::from(([ad_ip_data[0],
                                         ad_ip_data[1], ad_ip_data[2], ad_ip_data[3]], port_number));
 
-                                peer_ads.write().unwrap().insert(advertised_addr);
-                                if verbose {println!("Added {:?} to the peer_list", advertised_addr);}
+                                println!("Waiting for peer_ads");
+                                //Udate the peer and advertisement list with the addr
+                                peer_ads.write().unwrap().insert(write.lock().unwrap().peer_addr().unwrap(), advertised_addr.clone());
+
+                                println!("UPDARTED!!");
+                                if debug {println!("Added {:?} to the peer_list (AD)", advertised_addr);}
                             },
                             MSG => {
                                 println!("MSG: {}", String::from_utf8(data.to_vec()).unwrap());
                             },
                             PING => {
-                                if verbose {println!("Received a PING");}
+                                if debug {println!("Received a PING");}
                                 send_command(PONG, 0, &vec![], &mut write.lock().unwrap()); 
-                                if verbose {println!("Sent a PONG");}
+                                if debug {println!("Sent a PONG");}
                             }
                             PONG => {
-                                if verbose {println!("Receivied a PONG");}
+                                if debug {println!("Receivied a PONG");}
                             },
+                            PROJ => {
+                                println!("Responding to project verification");
+                                if data.len() != 128 {
+                                    println!("ERR: Received an invalid PROJ request");
+                                }
+                                let req_proj = data[0..64].to_vec();
+                                let req_file = data[64..128].to_vec();
+
+                                if debug {
+                                    println!("RECV PROJ: {:?}", req_proj);
+                                    println!("RECV FILE: {:?}", req_file);
+                                }
+                                let (proj_hash, file_hash) = get_directory_hash(project_dir.clone(), &mut HashMap::new(), false);
+
+                                //TODO: implement syncronization
+                                if proj_hash == req_proj && req_file == file_hash {
+                                    send_command(PROJ_VER, 1, &vec![1], &mut write.lock().unwrap());
+                                }
+                                else{
+                                    send_command(PROJ_VER, 1, &vec![0], &mut write.lock().unwrap());
+                                }
+
+                                let mut hashes = hashes.write().unwrap();
+                                hashes.0 = proj_hash;
+                                hashes.1 = file_hash;
+                            }
                             _ => {
                                 println!("??? Unknown OpCode ???: ({:?}, Length: {:?})", data, len);
                             }
@@ -460,8 +625,13 @@ fn main() -> Result<()>{
 
                         //println!("{:?}", data);
                     },
-                    Err(_) => {}
+                    Err(ref e) if e.kind() ==  ErrorKind::WouldBlock => {},
+                    Err(e) => {
+                        panic!(e);
+                        println!("REMOVING PERE");
+                    }
                 }
+                peer_index += 1;
             }
             thread::sleep(event_loop_delay);
        }
