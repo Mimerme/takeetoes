@@ -5,7 +5,7 @@ extern crate derive_new;
 extern crate gitignore;
 extern crate hex_string;
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4, SocketAddr, IpAddr};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
@@ -363,8 +363,8 @@ fn main() -> Result<()>{
 
    //Peer Vec Format
    //(read: TcpStream, write: TcpStream, advertied_ip: SocketAddr)
-   let mut peers : Arc<RwLock<Vec<(Mutex<TcpStream>, Mutex<TcpStream>)>>> =
-       Arc::new(RwLock::new(vec![]));
+   let mut peers : Arc<RwLock<HashMap<SocketAddr, (Mutex<TcpStream>, Mutex<TcpStream>)>>> =
+       Arc::new(RwLock::new(HashMap::new()));
    //<K,V> = <host_socket_add, net_socket_addr>
    let mut peer_ads : Arc<RwLock<HashMap<SocketAddr, SocketAddr>>> = Arc::new(RwLock::new(HashMap::new()));
 
@@ -413,7 +413,7 @@ fn main() -> Result<()>{
         }
 
         //Add this initial connection to the peer list
-        peers.write().unwrap().push((
+        peers.write().unwrap().insert(stream.peer_addr().unwrap(), (
             Mutex::new(stream_clone),
             Mutex::new(stream)
         ));
@@ -450,7 +450,7 @@ fn main() -> Result<()>{
  
 
             peer_ads.write().unwrap().insert(stream.peer_addr().unwrap(), peer_addr);
-            peers.write().unwrap().push((
+            peers.write().unwrap().insert(stream.peer_addr().unwrap(), (
                 Mutex::new(stream.try_clone().unwrap()), 
                 Mutex::new(stream),
             ));
@@ -465,6 +465,12 @@ fn main() -> Result<()>{
    let mut peers_clone = Arc::clone(&peers);
    let mut peers_debug = Arc::clone(&peers);
    let mut peer_ads_debug = Arc::clone(&peer_ads);
+
+
+    let ping_status : Arc<RwLock<HashMap<SocketAddr, SystemTime>>> = Arc::new(RwLock::new(HashMap::new()));
+    let ping_status_clone : Arc<RwLock<HashMap<SocketAddr, SystemTime>>> = Arc::clone(&ping_status);
+    let ping_status_clone2 : Arc<RwLock<HashMap<SocketAddr, SystemTime>>> = Arc::clone(&ping_status);
+    let ping_peer_ads = Arc::clone(&peer_ads);
 
    if debug {
        println!("<<< Starting debug shell >>>");
@@ -485,7 +491,7 @@ fn main() -> Result<()>{
                 //Send a broadcast to all Nodes
                 else if splits[0] == "msg" {
                     println!("Sending a broadcast..."); 
-                    for (read, write) in peers_debug.write().unwrap().iter() {
+                    for (_, (read, write)) in peers_debug.write().unwrap().iter() {
                         let mut write = write.lock().unwrap();
                         let data = (&splits[1].as_bytes()).to_vec();
                         send_command(MSG, data.len() as u8, &data, &mut write);
@@ -497,6 +503,11 @@ fn main() -> Result<()>{
                         println!("Peer: {:?}, {:?}", host_ip, net_ip);
                     }
                 }
+                else if splits[0] == "ping" {
+                    println!("!!!PING STATUS!!!");
+                    println!("Now: {:?}", SystemTime::now());
+                    println!("Table: {:?}", ping_status_clone2);
+                }
             }
         });
    }
@@ -505,9 +516,34 @@ fn main() -> Result<()>{
    //Start the peer watcher thread
    thread::spawn(move || {
         loop{
-            for (read, write) in peers_clone.read().unwrap().iter() {
-                
-            }
+              let ping_status = ping_status.read().unwrap();
+              //Check to see if any pings have expired. If so remove their entries from the 
+              for (addr, (read, write)) in peers_clone.read().unwrap().iter() {
+                  //TODO: remove the peer from the stream list as well
+                  //If any times are greater than 30 seconds remove the peek
+                  println!("{:?} {:?}", addr, ping_status);
+                  let time = ping_status.get(addr);
+
+                  //If the peer has been registered, but we haven't done a ping cycle with it yet
+                  if time == None{
+                    send_command(PING, 0, &vec![], &mut write.lock().unwrap());
+                    continue;
+                  }
+
+                  let time = time.unwrap();
+
+                  println!("elpa: {:?}", SystemTime::now().duration_since(*time).unwrap().as_secs());
+                  if SystemTime::now().duration_since(*time).unwrap().as_secs() > 5 {
+                      println!("Removing {:?}", addr);
+                      ping_peer_ads.write().unwrap().remove(addr);
+                      peers_clone.write().unwrap().remove(addr);
+                  }
+                  else {
+                      send_command(PING, 0, &vec![], &mut write.lock().unwrap());
+                  }
+              }
+            
+            thread::sleep(time::Duration::from_millis(5000));
         }        
    });
 
@@ -523,7 +559,7 @@ fn main() -> Result<()>{
             //println!("{:?}", peers_clone.read().unwrap().iter().len());
             let mut peer_index = 0;
             //println!("{}", peers_clone.read().unwrap().iter().len());
-            for (read, write) in peers_clone.read().unwrap().iter() {
+            for (_, (read, write)) in peers_clone.read().unwrap().iter() {
                 //send.lock().unwrap().send(b"asaaa".to_vec());
                 let mut recv = read.lock().unwrap();
                 match recv_command(&mut recv, false){
@@ -589,6 +625,7 @@ fn main() -> Result<()>{
                             }
                             PONG => {
                                 if debug {println!("Receivied a PONG");}
+                                ping_status_clone.write().unwrap().insert(write.lock().unwrap().peer_addr().unwrap(), SystemTime::now());
                             },
                             PROJ => {
                                 println!("Responding to project verification");
@@ -645,7 +682,7 @@ fn main() -> Result<()>{
        let peer_addr = tcp_connection.peer_addr().unwrap();
 
        //Add to the peer list
-       peers.write().unwrap().push((
+       peers.write().unwrap().insert(tcp_connection.peer_addr().unwrap(), (
            Mutex::new(tcp_connection.try_clone().unwrap()), 
            Mutex::new(tcp_connection),
        ));
