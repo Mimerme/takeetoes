@@ -33,12 +33,12 @@ use difference::Difference;
 use notify::{Watcher, RecommendedWatcher, RecursiveMode};
 use notify::Config;
 use notify::event::{EventKind, ModifyKind,MetadataKind};
-
+use std::convert::TryInto;
 
 //A test for difference matching
 fn test_owo(){
     println!("OBA<A");
-    let (tx, rx) = std::sync::mpsc::channel();
+    //let (tx, rx) = std::sync::mpsc::channel();
     let x = "HELLO";
     let y = "HELI0";
     let file_watch = "/home/mimerme/test";
@@ -58,15 +58,18 @@ fn test_owo(){
 
 }
 
+#[derive(Debug)]
 //Network representation of a change
 enum NetChange {
+    Start(String),
     Same(u64, u64),
     Rem(u64,u64),
-    Add(u64,String)
+    Add(u64,String),
+    End(),
 }
 
 //Just sends an event on tx whenever the Metadata of a file in the directory changes
-fn start_file_io(paths : Sender<Vec<PathBuf>>, proj_dir : String, changes : Receiver<NetChange>) {
+fn start_file_io(changes_out : Sender<NetChange>, proj_dir : String, changes_in : Receiver<NetChange>, files : &mut HashMap<String, (String, String)>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher : RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap()).unwrap();
 
@@ -74,13 +77,83 @@ fn start_file_io(paths : Sender<Vec<PathBuf>>, proj_dir : String, changes : Rece
     watcher.watch(&proj_dir, RecursiveMode::Recursive).unwrap();
     
     loop {
+        //On every time a file is written to in the directory we're monitoring...
         match rx.recv() {
             Ok(event) => {
                 let event = event.unwrap();
                 if event.kind == EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)) {
                     println!("Meta change {:?}", event.paths);
-                    paths.send(event.paths.clone());
+
+                    //Check to see if in the file
+                    for path in event.paths {
+                        let net_path = path.strip_prefix(proj_dir.clone()).unwrap();
+                        let net_path = net_path.to_str().unwrap().to_string();
+
+                        //...if the file is part of the network...
+                        if files.contains_key(&net_path) {
+                            println!("writting change");
+
+                            let host_path = files[&net_path].0.clone();
+                            let mut old_contents = &files[&net_path].1.clone();
+                            let mut new_contents = read_to_string(host_path.clone()).unwrap();
+
+                            //...send the changes to the main network thread
+                            let (edit_dist, changeset) = diff(&old_contents, &new_contents, "");
+
+                            println!("{:?}", changeset);
+                            println!("Capturing differences in \'{}\'", net_path);
+                            changes_out.send(NetChange::Start(net_path.clone()));
+                            let mut trav_index : u64 = 0;
+                            for change in changeset {
+                               match change {
+                                   Difference::Same(diff) => {
+                                        let (start, end) : (u64, u64) = (trav_index, trav_index + diff.len() as u64);
+                                        changes_out.send(NetChange::Same(start, end));
+                                        trav_index += diff.len() as u64;
+                                   },
+                                   Difference::Rem(diff) => {
+                                        let (start, end) : (u64, u64) = (trav_index, trav_index + diff.len() as u64);
+                                        changes_out.send(NetChange::Rem(start, end));
+                                   },
+                                   Difference::Add(diff) => {
+                                       changes_out.send(NetChange::Add(trav_index, diff.clone())); 
+                                       trav_index += diff.len() as u64;
+                                   }
+                               }
+                            }
+                            changes_out.send(NetChange::End());
+
+                            //...apply the changes received over the network
+                            let mut curr_net_path = "";
+                            while let Ok(change) = changes_in.try_recv() {
+                                println!("Change: {:?}", change);
+                                match change {
+                                    NetChange::Start(net_path) => {curr_net_path = &net_path;},
+                                    NetChange::Same(start,end) => {},
+                                    NetChange::Add(start, diff) => {
+                                        println!("add");
+                                        let start = start as usize; 
+                                        new_contents.insert_str(start, &diff);
+                                    },
+                                    NetChange::Rem(start,end) => {
+                                        println!("rem");
+                                        let start = start as usize; 
+                                        let end = end as usize; 
+                                        new_contents.replace_range(start..end, "");
+                                    },
+                                    _ => {panic!("todo");},
+                                }
+                            }
+
+
+                            println!("new contents\n{}", new_contents);
+                            write(host_path.clone(), new_contents.as_bytes());
+                            files.insert(net_path, (host_path, new_contents));
+                        }
+                    }
                 }
+
+
             }, 
             Err(e) => println!("watch error: {:?}", e),
         }
@@ -88,7 +161,7 @@ fn start_file_io(paths : Sender<Vec<PathBuf>>, proj_dir : String, changes : Rece
 }
 
 //Sends the syncronization packets to the peer network
-fn send_sync(connection : &mut TcpStream, file_bufs : &mut HashMap<String, (String, String)> , new : String, net_path : String){
+fn send_sync(mut connection : &mut TcpStream, file_bufs : &mut HashMap<String, (String, String)> , new : String, net_path : String){
     let old_contents = &file_bufs[&net_path].1.clone();
     let new_contents = &new;
 
@@ -97,45 +170,36 @@ fn send_sync(connection : &mut TcpStream, file_bufs : &mut HashMap<String, (Stri
     println!("{:?}", changeset);
     println!("Capturing differences in \'{}\'", net_path);
 
-    //Begin serializing the changeset to the network
     
-    //TODO: lol do something about this
-    if net_path.len() > 255 {
-        panic!("NET PATH TOO LONG. I DIDN'T THINK OF WHAT TO DO");
-    }
+
     
     //Introduce the node
-    send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes(), &mut connection);
+    send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes().to_vec(), &mut connection);
 
     //Using u64s becuase max file size for NTFS is 2^64 bytes (largest of all filesystems) 
     let mut trav_index : u64 = 0;
     for change in changeset {
         match change {
-            Same(diff) => {
+            Difference::Same(diff) => {
                 //Send the start and end indicies of the non-change xd
                 //TODO: set these as u64s or something
-                let (start, end) : (u64, u64) = (trav_index, trav_index + diff.len())
-                let data = Vec::new();
-                data.extend_from_slize(&start.to_be_bytes());
-                data.extend_from_slize(&end.to_be_bytes());
+                let (start, end) : (u64, u64) = (trav_index, trav_index + diff.len() as u64);
+                let mut data = Vec::new();
+                data.extend_from_slice(&start.to_be_bytes());
+                data.extend_from_slice(&end.to_be_bytes());
                 send_command(SYNC_SAME, 16, &data, &mut connection);
-                trav_index += diff.len();    
+                trav_index += diff.len() as u64;
             },
-            Rem(diff) => {
+            Difference::Rem(diff) => {
                 //Send the start and end indicies of the change
-                let (start, end) = (trav_index, trav_index + diff.len())
-                let data = Vec::new();
-                data.extend_from_slize(&start.to_be_bytes());
-                data.extend_from_slize(&end.to_be_bytes());
+                let (start, end) = (trav_index, trav_index + diff.len() as u64);
+                let mut data = Vec::new();
+                data.extend_from_slice(&start.to_be_bytes());
+                data.extend_from_slice(&end.to_be_bytes());
                 send_command(SYNC_REM, 16, &data, &mut connection);
             },
-            Add(diff) => {
-                //Send the start index and the data to append
-                let data = Vec::new();
-                data.extend_from_slize(&start.to_be_bytes());
-                data.extend_from_slize(diff.as_byte());
-                send_command(SYNC_ADD, 8 + diff.len(), &data, &mut connection);
-                trav_index += diff.len();
+            Difference::Add(diff) => {
+
             },
         }
     }
@@ -491,12 +555,13 @@ fn main() -> Result<()>{
    }
 
    //We verify project structure and file integrity with two seperate hashes
-   let mut files : HashMap<String, (String, String)> = HashMap::new();
+   let mut files : Arc<RwLock<HashMap<String, (String, String)>>> = Arc::new(RwLock::new(HashMap::new()));
    let mut hashes : Arc<RwLock<(Vec<u8>, Vec<u8>)>> = Arc::new(RwLock::new((vec![], vec![])));
 
 
    //Calculate the directory hash
-   let (proj_hash, file_hash) = get_directory_hash(project_dir.clone(), &mut files, true);
+   //wrap this is brackets to ensure that files.write() lock gets dropped after
+   let (proj_hash, file_hash) = { get_directory_hash(project_dir.clone(), &mut files.write().unwrap(), true)};
    hashes.write().unwrap().0 = proj_hash.clone();
    hashes.write().unwrap().1 = file_hash.clone();
 
@@ -513,7 +578,7 @@ fn main() -> Result<()>{
 
    //Start the file IO thread
    thread::spawn(move || {
-       start_file_io(event_send, pd_clone, change_recv);
+       start_file_io(event_send, pd_clone, change_recv, &mut files.write().unwrap());
    });
 
 
@@ -876,30 +941,34 @@ fn main() -> Result<()>{
                                 hashes.1 = file_hash;
                             },
                             START_SYNC => {
-                                let net_path = String::from_utf8(&data);
+                                let net_path = String::from_utf8(data.clone()).unwrap();
+                                change_send.send(NetChange::Start(net_path));
+
+                                println!("Starting sync");
 
                                 //TODO: Probably should make this e useful or something. test as a
                                 //POC
-                                let mut (op, len, data) = recv_command(&mut recv, true);
+                                let (mut op, mut len, mut data) = recv_command(&mut recv, true).unwrap();
                                 while op != STOP_SYNC {
                                     match op {
                                         SYNC_SAME => {
-                                            change_send.send(NetChange::Same(u64::from_be_bytes(&data[0..8]), u64::from_be_bytes(&data[8..16])));
+                                            change_send.send(NetChange::Same(u64::from_be_bytes(data[0..8].try_into().unwrap()), u64::from_be_bytes(data[8..16].try_into().unwrap())));
                                         },
                                         SYNC_REM => {
-                                            change_send.send(NetChange::Rem(u64::from_be_bytes(&data[0..8]), u64::from_be_bytes(&data[8..16])));
+                                            change_send.send(NetChange::Rem(u64::from_be_bytes(data[0..8].try_into().unwrap()), u64::from_be_bytes(data[8..16].try_into().unwrap())));
                                         },
                                         SYNC_ADD => {
-                                            change.send(NetChange::Add(u64::from_be_bytes(&data[0..8]), String::from_utf8(&data[8..])));
+                                            change_send.send(NetChange::Add(u64::from_be_bytes(data[0..8].try_into().unwrap()), String::from_utf8(data[8..].try_into().unwrap()).unwrap()));
                                         },
+                                        _ => {panic!("wtf happend")},
                                     }
-
-                                    (op, len, data) = recv_command(&mut recv, true);
+                                    //https://github.com/rust-lang/rfcs/issues/372
+                                    let (tmp_op, tmp_len, tmp_data) = recv_command(&mut recv, true).unwrap();
+                                    op = tmp_op;
+                                    len = tmp_len;
+                                    data = tmp_data;
                                 }
                     
-                                
-
-                                change_send.send();
                             },
                             _ => {
                                 println!("??? Unknown OpCode ???: ({:?}, Length: {:?})", data, len);
@@ -914,15 +983,44 @@ fn main() -> Result<()>{
                         let now = SystemTime::now();
                         let read_only = ping_status.read().unwrap().clone();
 
+                        let mut connection = write.lock().unwrap();
                         //Handle sending file differences if there exists any
-                        while let Ok(paths) = event_recv.try_recv() {
-                            for path in paths {
-                                let net_path = path.strip_prefix(project_dir.clone()).unwrap().to_str().unwrap().to_string();
-                                if files.contains_key(&net_path) { 
-                                    let content = read_to_string(files[&net_path].0.clone()).unwrap();
-                                    send_sync(&write.lock().unwrap(), &mut files, content, net_path);
-                                }
-                            }   
+                        while let Ok(change) = event_recv.try_recv() {
+                            //Begin serializing the changeset to the network
+                            match change {
+                                NetChange::Start(net_path) => {
+                                    //TODO: lol do something about this
+                                    if net_path.len() > 255 {
+                                        panic!("NET PATH TOO LONG. I DIDN'T THINK OF WHAT TO DO");
+                                    }
+
+                                    send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes().to_vec(), &mut connection);
+                                },
+                                NetChange::Add(start, diff) => {
+                                    //Send the start index and the data to append
+                                    let mut data = Vec::new();
+                                    data.extend_from_slice(&start.to_be_bytes());
+                                    data.extend_from_slice(diff.as_bytes());
+                                    send_command(SYNC_ADD, (8 + diff.len()).try_into().unwrap(), &data, &mut connection);
+                                },
+                                NetChange::Rem(start, end) => {
+                                    //Send the start and end indicies of the change
+                                    let mut data = Vec::new();
+                                    data.extend_from_slice(&start.to_be_bytes());
+                                    data.extend_from_slice(&end.to_be_bytes());
+                                    send_command(SYNC_REM, 16, &data, &mut connection);
+                                },
+                                NetChange::Same(start, end) => {
+                                    let mut data = Vec::new();
+                                    data.extend_from_slice(&start.to_be_bytes());
+                                    data.extend_from_slice(&end.to_be_bytes());
+                                    send_command(SYNC_SAME, 16, &data, &mut connection);
+                                },
+                                NetChange::End() => {
+                                    send_command(STOP_SYNC, 0, &vec![], &mut connection);
+                                },
+
+                            }
                         }
 
                         //Update the ping table if needed
