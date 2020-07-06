@@ -80,71 +80,67 @@ fn start_file_io(paths : Sender<Vec<PathBuf>>, proj_dir : String) {
     }
 }
 
-fn send_diff(connection : &TcpStream, file_bufs : &mut HashMap<String, (String, String)> , new : String, net_path : String){
-    let (edit_dist, changeset) = diff(&file_bufs[&net_path].1, &new, "\n");
+//Sends the syncronization packets to the peer network
+fn send_sync(connection : &mut TcpStream, file_bufs : &mut HashMap<String, (String, String)> , new : String, net_path : String){
+    let old_contents = &file_bufs[&net_path].1.clone();
+    let new_contents = &new;
+
+    let (edit_dist, changeset) = diff(&old_contents, &new_contents, "");
 
     println!("{:?}", changeset);
     println!("Capturing differences in \'{}\'", net_path);
 
-    let mut cur_index : u8 = 0;
+    //Begin serializing the changeset to the network
+    
+    //TODO: lol do something about this
+    if net_path.len() > 255 {
+        panic!("NET PATH TOO LONG. I DIDN'T THINK OF WHAT TO DO");
+    }
+    
+    //Introduce the node
+    send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes(), &mut connection);
 
-    //(type, start, end)
-    //1 = remove
-    //2 = add
-    let net_data : Vec<(u8, u8, u8)> = Vec::new();
+    //Using u64s becuase max file size for NTFS is 2^64 bytes (largest of all filesystems) 
+    let mut trav_index : u64 = 0;
+    for change in changeset {
+        match change {
+            Same(diff) => {
+                //Send the start and end indicies of the non-change xd
+                //TODO: set these as u64s or something
+                let (start, end) : (u64, u64) = (trav_index, trav_index + diff.len())
+                let data = Vec::new();
+                data.extend_from_slize(&start.to_be_bytes());
+                data.extend_from_slize(&end.to_be_bytes());
+                send_command(SYNC_SAME, 16, &data, &mut connection);
+                trav_index += diff.len();    
+            },
+            Rem(diff) => {
+                //Send the start and end indicies of the change
+                let (start, end) = (trav_index, trav_index + diff.len())
+                let data = Vec::new();
+                data.extend_from_slize(&start.to_be_bytes());
+                data.extend_from_slize(&end.to_be_bytes());
+                send_command(SYNC_REM, 16, &data, &mut connection);
+            },
+            Add(diff) => {
+                //Send the start index and the data to append
+                let data = Vec::new();
+                data.extend_from_slize(&start.to_be_bytes());
+                data.extend_from_slize(diff.as_byte());
+                send_command(SYNC_ADD, 8 + diff.len(), &data, &mut connection);
+                trav_index += diff.len();
+            },
+        }
+    }
 
-    //Iterate over the changeset and construct the network indicies to send
-    //for change in changeset {
-    //    match change {
-    //        Same(chars) => {
-    //            cur_index += chars.len();
-    //        },
-    //        Rem(chars) => {
-    //            net_data.push((1, chars));
-    //        },
-    //        Add(chars) => {
-    //            net_data.push((2, cur_index, cur_index + chars.len()));
-    //        }
-    //    }
-    //}
+    send_command(STOP_SYNC, 0, &vec![], &mut connection);
 
+
+    file_bufs.insert(net_path.clone(), (file_bufs[&net_path].0.clone(), new.clone()));
 }
-
-//
-//.
-//e
-//e
-//t
-//s
-//y
-//s . . . . . R
-//  s y s t e m
-fn difference_match(old : String, new : String) {
-    //THis limit might be arbitrary (double checK0, but just in case....
-//    if old.len() >= 255 || new.len() >= 255 {
-//        panic!("Cannot construct match with invalid lengths");
-//    }
-//
-//    let diff_vec : Vec<(u8, DiffChar> = Vec::new();
-//    
-//    //let replace 
-//    //Iterate over each character of the new string
-//    for x in 0..new.len() {
-//        if x == old.len(){
-//            diff_vec.push((old.len() - )); 
-//        }
-//
-//        if old.char_at(x) != new.char_at(x) {
-//            diff_vec.push((x, DiffChar::REPLACE));
-//       }
-//
-//   }
-//
-
-}
-
 
 //TakeetoeProtocol OpCodes
+//Used connecting to a Takeetoe network
 const INTRO : u8 = 0x01;        //Used for introducing a new node to the network
 const INTRO_RES : u8 = 0x02;    //Used by network nodes to acknowledge INTRO
 const AD : u8 = 0x03;           //Sent by a node to advertise its server, but doesn't expect a response
@@ -166,7 +162,9 @@ const START_SYNC : u8 = 0x10;   //Specify which file to syncronize
 //len = 2 + line.len() (0-253) | data= start_index,end_index,string
 //NOTE: This will likely be able to handle at least a full line since most programmers don't leave
 //their lines of 200 characters
-const SYNC_DATA : u8 = 0x11;    //Send the data to syncronize
+const SYNC_SAME : u8 = 0x11;    //Send the data to syncronize
+const SYNC_REM : u8 = 0x12;     //Send the data to syncronize
+const SYNC_ADD : u8 = 0x14;     //Send the data to syncronize
 
 //Probably uneeded
 //len = 2 | data = start_index,end_index
@@ -887,7 +885,8 @@ fn main() -> Result<()>{
                             for path in paths {
                                 let net_path = path.strip_prefix(project_dir.clone()).unwrap().to_str().unwrap().to_string();
                                 if files.contains_key(&net_path) { 
-                                    send_diff(&write.lock().unwrap(), &mut files.clone(), read_to_string(files[&net_path].0.clone()).unwrap(), net_path);
+                                    let content = read_to_string(files[&net_path].0.clone()).unwrap();
+                                    send_sync(&write.lock().unwrap(), &mut files, content, net_path);
                                 }
                             }   
                         }
