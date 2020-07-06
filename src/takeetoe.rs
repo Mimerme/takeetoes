@@ -47,7 +47,7 @@ fn test_owo(){
     println!("ED: {:?}", dist);
     println!("Changeset: {:?}", changeset);
 
-    start_file_io(tx, file_watch.to_string());
+    //start_file_io(tx, file_watch.to_string());
 
     //for res in rx {
     //    match res {
@@ -58,8 +58,15 @@ fn test_owo(){
 
 }
 
+//Network representation of a change
+enum NetChange {
+    Same(u64, u64),
+    Rem(u64,u64),
+    Add(u64,String)
+}
+
 //Just sends an event on tx whenever the Metadata of a file in the directory changes
-fn start_file_io(paths : Sender<Vec<PathBuf>>, proj_dir : String) {
+fn start_file_io(paths : Sender<Vec<PathBuf>>, proj_dir : String, changes : Receiver<NetChange>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher : RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap()).unwrap();
 
@@ -502,10 +509,11 @@ fn main() -> Result<()>{
    //Send outbound communications for the IO thread
    let pd_clone = project_dir.clone();
    let (event_send, event_recv) = mpsc::channel();
+   let (change_send, change_recv) = mpsc::channel();
 
    //Start the file IO thread
    thread::spawn(move || {
-       start_file_io(event_send, pd_clone);
+       start_file_io(event_send, pd_clone, change_recv);
    });
 
 
@@ -866,7 +874,33 @@ fn main() -> Result<()>{
                                 let mut hashes = hashes.write().unwrap();
                                 hashes.0 = proj_hash;
                                 hashes.1 = file_hash;
-                            }
+                            },
+                            START_SYNC => {
+                                let net_path = String::from_utf8(&data);
+
+                                //TODO: Probably should make this e useful or something. test as a
+                                //POC
+                                let mut (op, len, data) = recv_command(&mut recv, true);
+                                while op != STOP_SYNC {
+                                    match op {
+                                        SYNC_SAME => {
+                                            change_send.send(NetChange::Same(u64::from_be_bytes(&data[0..8]), u64::from_be_bytes(&data[8..16])));
+                                        },
+                                        SYNC_REM => {
+                                            change_send.send(NetChange::Rem(u64::from_be_bytes(&data[0..8]), u64::from_be_bytes(&data[8..16])));
+                                        },
+                                        SYNC_ADD => {
+                                            change.send(NetChange::Add(u64::from_be_bytes(&data[0..8]), String::from_utf8(&data[8..])));
+                                        },
+                                    }
+
+                                    (op, len, data) = recv_command(&mut recv, true);
+                                }
+                    
+                                
+
+                                change_send.send();
+                            },
                             _ => {
                                 println!("??? Unknown OpCode ???: ({:?}, Length: {:?})", data, len);
                             }
