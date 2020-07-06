@@ -10,9 +10,18 @@ edition = "2018"
 argparse = "0.2.2"
 igd = "0.11.1"
 derive-new = "0.5"
-derefable = "0.1.0"
+walkdir = "2"
+sha2 = "0.9.1"
+gitignore = "1.0.6"
+hex-string = "0.1.0"
 
+#Probably can figure out an implementation for histogram later
+#https://stackoverflow.com/questions/19949526/examples-of-different-results-produced-by-the-standard-myers-minimal-patienc
+difference = "0.4"
 
+# For observing filesystem events
+crossbeam-channel = "0.4.0"
+notify = "5.0.0-pre.3"
 
 [[bin]]
 name = "punch"

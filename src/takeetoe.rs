@@ -4,6 +4,7 @@ extern crate igd;
 extern crate derive_new;
 extern crate gitignore;
 extern crate hex_string;
+extern crate difference;
 
 use std::time::{Duration, SystemTime};
 use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4, SocketAddr, IpAddr};
@@ -20,13 +21,128 @@ use std::{thread, time};
 use std::boxed::Box;
 use std::str::FromStr;
 use walkdir::WalkDir;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use sha2::{Sha256, Sha512, Digest};
 //Some convenience functions for reading and writting to files
 use std::fs::{read_to_string, write};
 use std::fs::{metadata, File};
 use std::io::BufReader;
 use hex_string::HexString;
+use difference::diff;
+use difference::Difference;
+use notify::{Watcher, RecommendedWatcher, RecursiveMode};
+use notify::Config;
+use notify::event::{EventKind, ModifyKind,MetadataKind};
+
+
+//A test for difference matching
+fn test_owo(){
+    println!("OBA<A");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let x = "HELLO";
+    let y = "HELI0";
+    let file_watch = "/home/mimerme/test";
+
+    let (dist, changeset) = diff(x, y, "");
+    println!("ED: {:?}", dist);
+    println!("Changeset: {:?}", changeset);
+
+    start_file_io(tx, file_watch.to_string());
+
+    //for res in rx {
+    //    match res {
+    //        Ok(event) => println!("changed: {:?}", event),
+    //        Err(e) => println!("watch error: {:?}", e),
+    //    }
+    //}
+
+}
+
+//Just sends an event on tx whenever the Metadata of a file in the directory changes
+fn start_file_io(paths : Sender<Vec<PathBuf>>, proj_dir : String) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher : RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap()).unwrap();
+
+    //water.configure(Config::PreciseEvents(true)).unwrap();
+    watcher.watch(&proj_dir, RecursiveMode::Recursive).unwrap();
+    
+    loop {
+        match rx.recv() {
+            Ok(event) => {
+                let event = event.unwrap();
+                if event.kind == EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)) {
+                    println!("Meta change {:?}", event.paths);
+                    paths.send(event.paths.clone());
+                }
+            }, 
+            Err(e) => println!("watch error: {:?}", e),
+        }
+    }
+}
+
+fn send_diff(connection : &TcpStream, file_bufs : &mut HashMap<String, (String, String)> , new : String, net_path : String){
+    let (edit_dist, changeset) = diff(&file_bufs[&net_path].1, &new, "\n");
+
+    println!("{:?}", changeset);
+    println!("Capturing differences in \'{}\'", net_path);
+
+    let mut cur_index : u8 = 0;
+
+    //(type, start, end)
+    //1 = remove
+    //2 = add
+    let net_data : Vec<(u8, u8, u8)> = Vec::new();
+
+    //Iterate over the changeset and construct the network indicies to send
+    //for change in changeset {
+    //    match change {
+    //        Same(chars) => {
+    //            cur_index += chars.len();
+    //        },
+    //        Rem(chars) => {
+    //            net_data.push((1, chars));
+    //        },
+    //        Add(chars) => {
+    //            net_data.push((2, cur_index, cur_index + chars.len()));
+    //        }
+    //    }
+    //}
+
+}
+
+//
+//.
+//e
+//e
+//t
+//s
+//y
+//s . . . . . R
+//  s y s t e m
+fn difference_match(old : String, new : String) {
+    //THis limit might be arbitrary (double checK0, but just in case....
+//    if old.len() >= 255 || new.len() >= 255 {
+//        panic!("Cannot construct match with invalid lengths");
+//    }
+//
+//    let diff_vec : Vec<(u8, DiffChar> = Vec::new();
+//    
+//    //let replace 
+//    //Iterate over each character of the new string
+//    for x in 0..new.len() {
+//        if x == old.len(){
+//            diff_vec.push((old.len() - )); 
+//        }
+//
+//        if old.char_at(x) != new.char_at(x) {
+//            diff_vec.push((x, DiffChar::REPLACE));
+//       }
+//
+//   }
+//
+
+}
+
 
 //TakeetoeProtocol OpCodes
 const INTRO : u8 = 0x01;        //Used for introducing a new node to the network
@@ -40,6 +156,23 @@ const PONG : u8 = 0x07;         //response to a PING with PONG
 //len = 128, <PROJ>(64) <FILE>(64)
 const PROJ : u8 = 0x08;         //Used for verifying project structures and file contents
 const PROJ_VER : u8 = 0x09;     //Used for responding to project and file verifications
+
+//len = path.len() | data=net_path
+const START_SYNC : u8 = 0x10;   //Specify which file to syncronize
+
+//NOTE: conflict resolution is handled by the clients and a voting system will likely be created to
+//resolve them (automatically and manually)
+
+//len = 2 + line.len() (0-253) | data= start_index,end_index,string
+//NOTE: This will likely be able to handle at least a full line since most programmers don't leave
+//their lines of 200 characters
+const SYNC_DATA : u8 = 0x11;    //Send the data to syncronize
+
+//Probably uneeded
+//len = 2 | data = start_index,end_index
+//const REM_DAT : u8 = 0x12;      //Remove data to syncronize
+
+const STOP_SYNC : u8 = 0x13;    //Alerts a peer node to stop listening for syncronization packets
 
 //Some Test Commands
 //cargo run --bin node -- --debug --delay 10 -p ~/test --binding_ip 127.0.0.1:6969
@@ -115,7 +248,6 @@ fn verify_file_hash(proj_hash : &Vec<u8>, file_hash : &Vec<u8>, mut peer_stream 
 }
 
 
-
 //Returns the structure and content hash
 //2 seperate hashes, one represents the directory structure, the other the file contents
 fn get_directory_hash(project_dir : String, files :&mut HashMap<String, (String, String)>, output_files : bool) -> (Vec<u8>, Vec<u8>){
@@ -139,6 +271,8 @@ fn get_directory_hash(project_dir : String, files :&mut HashMap<String, (String,
      //Get all the files that are not excluded by the .gitignore
      let mut proj_iter = git_ignore.included_files().unwrap();
      proj_iter.sort_by(|a, b| a.file_name().unwrap().cmp(b.file_name().unwrap()));
+
+    println!("{:?}", proj_iter);
 
      //for entry in WalkDir::new(&project_dir).sort_by(|a,b| a.file_name().cmp(b.file_name())) {
      for entry in proj_iter.iter(){
@@ -269,6 +403,7 @@ fn main() -> Result<()>{
     let mut punch = false;
     let mut debug = false;
     let mut net_debug = false;
+    let mut test = false;
 
     {
         let mut parser = ArgumentParser::new();
@@ -278,6 +413,8 @@ fn main() -> Result<()>{
             .add_option(&["--upnp"], StoreTrue, "Use unpnp to automatically port forward (router must support it)");
         parser.refer(&mut debug)
             .add_option(&["-d", "--debug"], StoreTrue, "Enable the debugging shell");
+        parser.refer(&mut test)
+            .add_option(&["-t", "--test"], StoreTrue, "Test");
         parser.refer(&mut net_debug)
             .add_option(&["-n", "--net_debug"], StoreTrue, "Enable network debugging shell");
         parser.refer(&mut punch)
@@ -300,6 +437,11 @@ fn main() -> Result<()>{
  
         parser.parse_args_or_exit();
    
+   }
+
+   if test {
+       test_owo();
+       panic!("test");
    }
 
    if delay != "0" {
@@ -358,9 +500,14 @@ fn main() -> Result<()>{
       println!("FILE HASH: {:?}", HexString::from_bytes(&file_hash));
    }
 
+
+   //Send outbound communications for the IO thread
+   let pd_clone = project_dir.clone();
+   let (event_send, event_recv) = mpsc::channel();
+
    //Start the file IO thread
    thread::spawn(move || {
-
+       start_file_io(event_send, pd_clone);
    });
 
 
@@ -734,6 +881,16 @@ fn main() -> Result<()>{
                     Err(ref e) if e.kind() ==  ErrorKind::WouldBlock => {
                         let now = SystemTime::now();
                         let read_only = ping_status.read().unwrap().clone();
+
+                        //Handle sending file differences if there exists any
+                        while let Ok(paths) = event_recv.try_recv() {
+                            for path in paths {
+                                let net_path = path.strip_prefix(project_dir.clone()).unwrap().to_str().unwrap().to_string();
+                                if files.contains_key(&net_path) { 
+                                    send_diff(&write.lock().unwrap(), &mut files.clone(), read_to_string(files[&net_path].0.clone()).unwrap(), net_path);
+                                }
+                            }   
+                        }
 
                         //Update the ping table if needed
                         for (host_sock, (status, last_command)) in read_only.iter() {
