@@ -4,7 +4,7 @@ extern crate igd;
 extern crate derive_new;
 extern crate gitignore;
 extern crate hex_string;
-extern crate difference;
+extern crate diffy;
 
 use std::time::{Duration, SystemTime};
 use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4, SocketAddr, IpAddr};
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::sync::mpsc::{Sender, Receiver};
 use std::sync::mpsc;
 use std::ops::{Deref, DerefMut};
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashSet, HashMap, VecDeque};
 use std::{thread, time};
 use std::boxed::Box;
 use std::str::FromStr;
@@ -28,12 +28,13 @@ use std::fs::{read_to_string, write};
 use std::fs::{metadata, File};
 use std::io::BufReader;
 use hex_string::HexString;
-use difference::diff;
-use difference::Difference;
 use notify::{Watcher, RecommendedWatcher, RecursiveMode};
 use notify::Config;
 use notify::event::{EventKind, ModifyKind,MetadataKind};
 use std::convert::TryInto;
+use diffy::create_patch;
+
+pub mod net;
 
 //A test for difference matching
 fn test_owo(){
@@ -58,20 +59,12 @@ fn test_owo(){
 
 }
 
-#[derive(Debug)]
-//Network representation of a change
-enum NetChange {
-    Start(String),
-    Same(u64, u64),
-    Rem(u64,u64),
-    Add(u64,String),
-    End(),
-}
 
 //Just sends an event on tx whenever the Metadata of a file in the directory changes
-fn start_file_io(changes_out : Sender<NetChange>, proj_dir : String, changes_in : Receiver<NetChange>, files : &mut HashMap<String, (String, String)>) {
+fn start_file_io(changes_out : Sender<(u8, u64, Patch)>, proj_dir : String, changes_in : Receiver<(u8, u64, Vec<u8>)>, files : &mut HashMap<String, (String, String)>, version_history : &mut Arc<RwLock<HashMap<String, (String, String)>>>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher : RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap()).unwrap();
+    let mut change_buffer : HashMap<String, Vec<NetChange>> = HashMap::new();
 
     //water.configure(Config::PreciseEvents(true)).unwrap();
     watcher.watch(&proj_dir, RecursiveMode::Recursive).unwrap();
@@ -80,6 +73,29 @@ fn start_file_io(changes_out : Sender<NetChange>, proj_dir : String, changes_in 
         //On every time a file is written to in the directory we're monitoring...
         match rx.recv() {
             Ok(event) => {
+                //Read in the change buffer from the network...
+                //TODO: none of this handles conflicts
+                //...save the changes received over the network in the change_buffer
+                //let mut curr_net_path = "".to_string();
+                //while let Ok(change) = changes_in.try_recv() {
+                //    println!("Change: {:?}", change);
+                //    match change {
+                //        NetChange::Start(net_path) => {
+                //            curr_net_path = net_path.clone();
+
+                //            //Create the Vec mapping if it doesn't exist
+                //            if !change_buffer.contains_key(&net_path) {
+                //                change_buffer.insert(net_path.clone(), vec![]);
+                //            }
+                //            change_buffer.get_mut(&curr_net_path).unwrap().push(NetChange::Start(net_path));
+                //        },
+                //        x => {
+                //            change_buffer.get_mut(&curr_net_path).unwrap().push(x);
+                //        }
+                //    }
+                //}
+
+
                 let event = event.unwrap();
                 if event.kind == EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)) {
                     println!("Meta change {:?}", event.paths);
@@ -97,66 +113,24 @@ fn start_file_io(changes_out : Sender<NetChange>, proj_dir : String, changes_in 
                             let mut old_contents = &files[&net_path].1.clone();
                             let mut new_contents = read_to_string(host_path.clone()).unwrap();
 
+                            //TODO: working here
+                            //NOTE: Andros, start working on moving some functions to different
+                            //files to clean up this one and make it more readable
                             //...send the changes to the main network thread
-                            let (edit_dist, changeset) = diff(&old_contents, &new_contents, "");
+                            let patch = create_patch(&old_contents, &new_contents);
+                            let patch = patch.to_bytes();
+                            changes_out.send((PATCH, patch.len(), patch));
 
-                            println!("{:?}", changeset);
-                            println!("Capturing differences in \'{}\'", net_path);
-                            changes_out.send(NetChange::Start(net_path.clone()));
-                            let mut trav_index : u64 = 0;
-                            for change in changeset {
-                               match change {
-                                   Difference::Same(diff) => {
-                                        let (start, end) : (u64, u64) = (trav_index, trav_index + diff.len() as u64);
-                                        changes_out.send(NetChange::Same(start, end));
-                                        trav_index += diff.len() as u64;
-                                   },
-                                   Difference::Rem(diff) => {
-                                        let (start, end) : (u64, u64) = (trav_index, trav_index + diff.len() as u64);
-                                        changes_out.send(NetChange::Rem(start, end));
-                                   },
-                                   Difference::Add(diff) => {
-                                       changes_out.send(NetChange::Add(trav_index, diff.clone())); 
-                                       trav_index += diff.len() as u64;
-                                   }
-                               }
-                            }
-                            changes_out.send(NetChange::End());
-
-                            //...apply the changes received over the network
-                            let mut curr_net_path = "";
-                            while let Ok(change) = changes_in.try_recv() {
-                                println!("Change: {:?}", change);
-                                match change {
-                                    NetChange::Start(net_path) => {curr_net_path = &net_path;},
-                                    NetChange::Same(start,end) => {},
-                                    NetChange::Add(start, diff) => {
-                                        println!("add");
-                                        let start = start as usize; 
-                                        new_contents.insert_str(start, &diff);
-                                    },
-                                    NetChange::Rem(start,end) => {
-                                        println!("rem");
-                                        let start = start as usize; 
-                                        let end = end as usize; 
-                                        new_contents.replace_range(start..end, "");
-                                    },
-                                    _ => {panic!("todo");},
-                                }
-                            }
-
-
-                            println!("new contents\n{}", new_contents);
-                            write(host_path.clone(), new_contents.as_bytes());
-                            files.insert(net_path, (host_path, new_contents));
+                            println!("new contents\n{}", new_net_contents);
+                            write(host_path.clone(), new_net_contents.as_bytes());
+                            files.insert(net_path, (host_path, new_net_contents));
                         }
                     }
                 }
-
-
             }, 
             Err(e) => println!("watch error: {:?}", e),
         }
+
     }
 }
 
@@ -169,9 +143,6 @@ fn send_sync(mut connection : &mut TcpStream, file_bufs : &mut HashMap<String, (
 
     println!("{:?}", changeset);
     println!("Capturing differences in \'{}\'", net_path);
-
-    
-
     
     //Introduce the node
     send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes().to_vec(), &mut connection);
@@ -242,6 +213,9 @@ const SYNC_ADD : u8 = 0x14;     //Send the data to syncronize
 //const REM_DAT : u8 = 0x12;      //Remove data to syncronize
 
 const STOP_SYNC : u8 = 0x13;    //Alerts a peer node to stop listening for syncronization packets
+
+
+const PATCH : u8 = 0x69;
 
 //Some Test Commands
 //cargo run --bin node -- --debug --delay 10 -p ~/test --binding_ip 127.0.0.1:6969
@@ -390,6 +364,9 @@ fn send_command(opcode : u8, data_len : u8, data : &Vec<u8>, connection : &mut T
 fn recv_command(connection : &mut TcpStream, block : bool)->Result<(u8, u8, Vec<u8>)>{
     let net_debug = true;
     let mut network_header = vec![0;2];
+
+
+    connection.set_nonblocking(!block).expect("set_nonblocking failed");
     // Keep peeking until we have a network header in the connection stream
     //println!("recv_command()");
 
@@ -414,7 +391,6 @@ fn recv_command(connection : &mut TcpStream, block : bool)->Result<(u8, u8, Vec<
         }
     }
     else {
-        connection.set_nonblocking(true).expect("set_nonblocking failed");
 
         let ret = connection.peek(&mut network_header)?;
 
@@ -557,6 +533,9 @@ fn main() -> Result<()>{
    //We verify project structure and file integrity with two seperate hashes
    let mut files : Arc<RwLock<HashMap<String, (String, String)>>> = Arc::new(RwLock::new(HashMap::new()));
    let mut hashes : Arc<RwLock<(Vec<u8>, Vec<u8>)>> = Arc::new(RwLock::new((vec![], vec![])));
+   //                                           K: file_hash (filename+contents), V: (Contents,
+   //                                           next_hash [null = ""])
+   let mut version_history : Arc<RwLock<HashMap<String, (String, String)>>> = Arc::new(RwLock::new(HashMap::new()));
 
 
    //Calculate the directory hash
@@ -950,18 +929,21 @@ fn main() -> Result<()>{
                                 //POC
                                 let (mut op, mut len, mut data) = recv_command(&mut recv, true).unwrap();
                                 while op != STOP_SYNC {
+
+                                    println!("{:?}, {:?}, {:?}", op, len, data);
                                     match op {
                                         SYNC_SAME => {
-                                            change_send.send(NetChange::Same(u64::from_be_bytes(data[0..8].try_into().unwrap()), u64::from_be_bytes(data[8..16].try_into().unwrap())));
+                                            change_send.send(NetChange::Same(String::from_utf8(data).unwrap()));
                                         },
                                         SYNC_REM => {
-                                            change_send.send(NetChange::Rem(u64::from_be_bytes(data[0..8].try_into().unwrap()), u64::from_be_bytes(data[8..16].try_into().unwrap())));
+                                            change_send.send(NetChange::Rem(String::from_utf8(data).unwrap()));
                                         },
                                         SYNC_ADD => {
-                                            change_send.send(NetChange::Add(u64::from_be_bytes(data[0..8].try_into().unwrap()), String::from_utf8(data[8..].try_into().unwrap()).unwrap()));
+                                            change_send.send(NetChange::Add(String::from_utf8(data).unwrap()));
                                         },
                                         _ => {panic!("wtf happend")},
                                     }
+                                    change_send.send(NetChange::End());
                                     //https://github.com/rust-lang/rfcs/issues/372
                                     let (tmp_op, tmp_len, tmp_data) = recv_command(&mut recv, true).unwrap();
                                     op = tmp_op;
@@ -983,45 +965,6 @@ fn main() -> Result<()>{
                         let now = SystemTime::now();
                         let read_only = ping_status.read().unwrap().clone();
 
-                        let mut connection = write.lock().unwrap();
-                        //Handle sending file differences if there exists any
-                        while let Ok(change) = event_recv.try_recv() {
-                            //Begin serializing the changeset to the network
-                            match change {
-                                NetChange::Start(net_path) => {
-                                    //TODO: lol do something about this
-                                    if net_path.len() > 255 {
-                                        panic!("NET PATH TOO LONG. I DIDN'T THINK OF WHAT TO DO");
-                                    }
-
-                                    send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes().to_vec(), &mut connection);
-                                },
-                                NetChange::Add(start, diff) => {
-                                    //Send the start index and the data to append
-                                    let mut data = Vec::new();
-                                    data.extend_from_slice(&start.to_be_bytes());
-                                    data.extend_from_slice(diff.as_bytes());
-                                    send_command(SYNC_ADD, (8 + diff.len()).try_into().unwrap(), &data, &mut connection);
-                                },
-                                NetChange::Rem(start, end) => {
-                                    //Send the start and end indicies of the change
-                                    let mut data = Vec::new();
-                                    data.extend_from_slice(&start.to_be_bytes());
-                                    data.extend_from_slice(&end.to_be_bytes());
-                                    send_command(SYNC_REM, 16, &data, &mut connection);
-                                },
-                                NetChange::Same(start, end) => {
-                                    let mut data = Vec::new();
-                                    data.extend_from_slice(&start.to_be_bytes());
-                                    data.extend_from_slice(&end.to_be_bytes());
-                                    send_command(SYNC_SAME, 16, &data, &mut connection);
-                                },
-                                NetChange::End() => {
-                                    send_command(STOP_SYNC, 0, &vec![], &mut connection);
-                                },
-
-                            }
-                        }
 
                         //Update the ping table if needed
                         for (host_sock, (status, last_command)) in read_only.iter() {
@@ -1062,6 +1005,59 @@ fn main() -> Result<()>{
                     }
                 }
                 peer_index += 1;
+            }
+
+
+            //Handle the file change events and sending file differences if there exists any
+            while let Ok(change) = event_recv.try_recv() {
+                //Begin serializing the changeset to the network
+                match change {
+                    NetChange::Start(net_path) => {
+                        //TODO: lol do something about this
+                        if net_path.len() > 255 {
+                            panic!("NET PATH TOO LONG. I DIDN'T THINK OF WHAT TO DO");
+                        }
+
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes().to_vec(), &mut connection);
+                        }
+                    },
+                    NetChange::Add(diff) => {
+                        //Send the start index and the data to append
+                        let mut data = Vec::new();
+                        data.extend_from_slice(diff.as_bytes());
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(SYNC_ADD, (diff.len()).try_into().unwrap(), &data, &mut connection);
+                        }
+                    },
+                    NetChange::Rem(diff) => {
+                        //Send the start index and the data to append
+                        let mut data = Vec::new();
+                        data.extend_from_slice(diff.as_bytes());
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(SYNC_REM, (diff.len()).try_into().unwrap(), &data, &mut connection);
+                        }
+                    },
+                    NetChange::Same(diff) => {
+                        //Send the start index and the data to append
+                        let mut data = Vec::new();
+                        data.extend_from_slice(diff.as_bytes());
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(SYNC_SAME, (diff.len()).try_into().unwrap(), &data, &mut connection);
+                        }
+                    },
+                    NetChange::End() => {
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(STOP_SYNC, 0, &vec![], &mut connection);
+                        }
+                    },
+
+                }
             }
             thread::sleep(event_loop_delay);
        }

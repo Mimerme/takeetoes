@@ -14,10 +14,7 @@ walkdir = "2"
 sha2 = "0.9.1"
 gitignore = "1.0.6"
 hex-string = "0.1.0"
-
-#Probably can figure out an implementation for histogram later
-#https://stackoverflow.com/questions/19949526/examples-of-different-results-produced-by-the-standard-myers-minimal-patienc
-difference = "0.4"
+diffy = "0.2.0"
 
 # For observing filesystem events
 crossbeam-channel = "0.4.0"
