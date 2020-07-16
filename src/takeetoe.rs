@@ -28,13 +28,14 @@ use std::fs::{read_to_string, write};
 use std::fs::{metadata, File};
 use std::io::BufReader;
 use hex_string::HexString;
-use notify::{Watcher, RecommendedWatcher, RecursiveMode};
-use notify::Config;
-use notify::event::{EventKind, ModifyKind,MetadataKind};
 use std::convert::TryInto;
 use diffy::create_patch;
 
+//Import some functions in the other files
 pub mod net;
+pub mod threads;
+use net::{recv_command, send_command};
+use threads::{start_file_thread, start_network_thread};
 
 //A test for difference matching
 fn test_owo(){
@@ -59,127 +60,6 @@ fn test_owo(){
 
 }
 
-
-//Just sends an event on tx whenever the Metadata of a file in the directory changes
-fn start_file_io(changes_out : Sender<(u8, u64, Patch)>, proj_dir : String, changes_in : Receiver<(u8, u64, Vec<u8>)>, files : &mut HashMap<String, (String, String)>, version_history : &mut Arc<RwLock<HashMap<String, (String, String)>>>) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher : RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap()).unwrap();
-    let mut change_buffer : HashMap<String, Vec<NetChange>> = HashMap::new();
-
-    //water.configure(Config::PreciseEvents(true)).unwrap();
-    watcher.watch(&proj_dir, RecursiveMode::Recursive).unwrap();
-    
-    loop {
-        //On every time a file is written to in the directory we're monitoring...
-        match rx.recv() {
-            Ok(event) => {
-                //Read in the change buffer from the network...
-                //TODO: none of this handles conflicts
-                //...save the changes received over the network in the change_buffer
-                //let mut curr_net_path = "".to_string();
-                //while let Ok(change) = changes_in.try_recv() {
-                //    println!("Change: {:?}", change);
-                //    match change {
-                //        NetChange::Start(net_path) => {
-                //            curr_net_path = net_path.clone();
-
-                //            //Create the Vec mapping if it doesn't exist
-                //            if !change_buffer.contains_key(&net_path) {
-                //                change_buffer.insert(net_path.clone(), vec![]);
-                //            }
-                //            change_buffer.get_mut(&curr_net_path).unwrap().push(NetChange::Start(net_path));
-                //        },
-                //        x => {
-                //            change_buffer.get_mut(&curr_net_path).unwrap().push(x);
-                //        }
-                //    }
-                //}
-
-
-                let event = event.unwrap();
-                if event.kind == EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)) {
-                    println!("Meta change {:?}", event.paths);
-
-                    //Check to see if in the file
-                    for path in event.paths {
-                        let net_path = path.strip_prefix(proj_dir.clone()).unwrap();
-                        let net_path = net_path.to_str().unwrap().to_string();
-
-                        //...if the file is part of the network...
-                        if files.contains_key(&net_path) {
-                            println!("writting change");
-
-                            let host_path = files[&net_path].0.clone();
-                            let mut old_contents = &files[&net_path].1.clone();
-                            let mut new_contents = read_to_string(host_path.clone()).unwrap();
-
-                            //TODO: working here
-                            //NOTE: Andros, start working on moving some functions to different
-                            //files to clean up this one and make it more readable
-                            //...send the changes to the main network thread
-                            let patch = create_patch(&old_contents, &new_contents);
-                            let patch = patch.to_bytes();
-                            changes_out.send((PATCH, patch.len(), patch));
-
-                            println!("new contents\n{}", new_net_contents);
-                            write(host_path.clone(), new_net_contents.as_bytes());
-                            files.insert(net_path, (host_path, new_net_contents));
-                        }
-                    }
-                }
-            }, 
-            Err(e) => println!("watch error: {:?}", e),
-        }
-
-    }
-}
-
-//Sends the syncronization packets to the peer network
-fn send_sync(mut connection : &mut TcpStream, file_bufs : &mut HashMap<String, (String, String)> , new : String, net_path : String){
-    let old_contents = &file_bufs[&net_path].1.clone();
-    let new_contents = &new;
-
-    let (edit_dist, changeset) = diff(&old_contents, &new_contents, "");
-
-    println!("{:?}", changeset);
-    println!("Capturing differences in \'{}\'", net_path);
-    
-    //Introduce the node
-    send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes().to_vec(), &mut connection);
-
-    //Using u64s becuase max file size for NTFS is 2^64 bytes (largest of all filesystems) 
-    let mut trav_index : u64 = 0;
-    for change in changeset {
-        match change {
-            Difference::Same(diff) => {
-                //Send the start and end indicies of the non-change xd
-                //TODO: set these as u64s or something
-                let (start, end) : (u64, u64) = (trav_index, trav_index + diff.len() as u64);
-                let mut data = Vec::new();
-                data.extend_from_slice(&start.to_be_bytes());
-                data.extend_from_slice(&end.to_be_bytes());
-                send_command(SYNC_SAME, 16, &data, &mut connection);
-                trav_index += diff.len() as u64;
-            },
-            Difference::Rem(diff) => {
-                //Send the start and end indicies of the change
-                let (start, end) = (trav_index, trav_index + diff.len() as u64);
-                let mut data = Vec::new();
-                data.extend_from_slice(&start.to_be_bytes());
-                data.extend_from_slice(&end.to_be_bytes());
-                send_command(SYNC_REM, 16, &data, &mut connection);
-            },
-            Difference::Add(diff) => {
-
-            },
-        }
-    }
-
-    send_command(STOP_SYNC, 0, &vec![], &mut connection);
-
-
-    file_bufs.insert(net_path.clone(), (file_bufs[&net_path].0.clone(), new.clone()));
-}
 
 //TakeetoeProtocol OpCodes
 //Used connecting to a Takeetoe network
@@ -259,36 +139,6 @@ const PATCH : u8 = 0x69;
 
 
 
-fn verify_file_hash(proj_hash : &Vec<u8>, file_hash : &Vec<u8>, mut peer_stream : &mut TcpStream) -> bool{
-      //Create the data vector to send
-      let mut data = proj_hash.clone();
-      data.extend(file_hash.clone());
-
-      //Begin verifying the hash with the peer
-      println!("Verifying hash with {:?}...", data);
-      send_command(PROJ, 128, &data, &mut peer_stream);
-      let (opcode, len, data) = recv_command(&mut peer_stream, true).unwrap();
-      println!("PPO {:?}, {:?}, {:?}", opcode, len, data);
-      
-      if opcode != PROJ_VER || len != 1{
-          panic!("ERR: Protocol out-of-order");
-      }
-
-      //1 = verified
-      //0 = non-matching hashes
-      //2 = willing to syncronize
-      match data[0] {
-         0 => {return false;},
-         1 => {return true;},
-         2 => {
-            //Begin syncronization
-            panic!("File syncronization needs implementing");
-         },
-        _ => {
-            panic!("Protocol Err");
-        }
-      }
-}
 
 
 //Returns the structure and content hash
@@ -345,86 +195,6 @@ fn get_directory_hash(project_dir : String, files :&mut HashMap<String, (String,
      let file_hash = file_hasher.finalize();
      return (proj_hash.to_vec(), file_hash.to_vec());
 }
-
-//Send a command to a TCPStream
-fn send_command(opcode : u8, data_len : u8, data : &Vec<u8>, connection : &mut TcpStream)->Result<()>{
-     let net_debug = true;
-     let mut data = data.clone();
-     if net_debug { 
-        println!("Sending command: {:?} | {:?} | {:?}", opcode, data_len, data);
-     }
-     //Add the headers to the outgoing data
-     data.insert(0, data_len);
-     data.insert(0, opcode);
-     connection.write_all(&data);
-
-     return Ok(());
-}
-
-fn recv_command(connection : &mut TcpStream, block : bool)->Result<(u8, u8, Vec<u8>)>{
-    let net_debug = true;
-    let mut network_header = vec![0;2];
-
-
-    connection.set_nonblocking(!block).expect("set_nonblocking failed");
-    // Keep peeking until we have a network header in the connection stream
-    //println!("recv_command()");
-
-    //println!("Loop: {:?}", block);
-    //Block until an entire command is received
-    if block {
-        //println!("Blocking...");
-        connection.read_exact(&mut network_header);
-        let data_len : u8 = network_header[1];
-        let dl_index : usize =  data_len.into();
-        let mut command = vec![0; dl_index];
-
-        //println!("Waiting for data... {:?}", dl_index);
-        if data_len != 0 { 
-            connection.read_exact(&mut command);
-            if net_debug { println!("Received command (blocking): {:?} | {:?} | {:?}", network_header[0], data_len, command);}
-            return Ok((network_header[0], data_len, command));
-        }
-        else {
-            if net_debug { println!("Received command (blocking): {:?} | {:?}", network_header[0], data_len);}
-            return Ok((network_header[0], 0, vec![]));
-        }
-    }
-    else {
-
-        let ret = connection.peek(&mut network_header)?;
-
-        if ret == 0 {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "EOF"));
-        }
-        else if ret < network_header.len() {
-            return Err(Error::new(ErrorKind::WouldBlock, "would block"));
-        }
-        let data_len : u8 = network_header[1];
-        let dl_index : usize = data_len.into();
-        let mut command = vec![0; dl_index + 2];
-        //println!("NO BLOCK2 {}", command.len());
-        let ret = connection.peek(&mut command)?;
-        if ret == 0 {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "EOF"));
-        }
-        else if  ret < command.len() {
-            //println!("YYEEET");
-            return Err(Error::new(ErrorKind::WouldBlock, "would block"));
-        }
-
-        //println!("READING EXACT");
-        connection.read_exact(&mut command);
-
-        if net_debug { 
-            let opcode = command[0];
-            let data = &command[2..(dl_index + 2)];
-
-            println!("Received command (non-blocking): {:?} | {:?} | {:?}", opcode, data_len, data);}
-        return Ok((command[0], data_len, command[2..(dl_index + 2)].to_vec()));
-    }
-}
-
 
 fn main() -> Result<()>{
     let mut connections : Vec<TcpStream> = vec![];
@@ -530,12 +300,36 @@ fn main() -> Result<()>{
         }
    }
 
+   //===FILE DATA STRUCTURES===
    //We verify project structure and file integrity with two seperate hashes
    let mut files : Arc<RwLock<HashMap<String, (String, String)>>> = Arc::new(RwLock::new(HashMap::new()));
    let mut hashes : Arc<RwLock<(Vec<u8>, Vec<u8>)>> = Arc::new(RwLock::new((vec![], vec![])));
    //                                           K: file_hash (filename+contents), V: (Contents,
    //                                           next_hash [null = ""])
    let mut version_history : Arc<RwLock<HashMap<String, (String, String)>>> = Arc::new(RwLock::new(HashMap::new()));
+
+   //===NETWORK DATA STRUCTURES===
+   //Peer Vec Format
+   //(read: TcpStream, write: TcpStream, advertied_ip: SocketAddr)
+   let mut peers : Arc<RwLock<HashMap<SocketAddr, (Mutex<TcpStream>, Mutex<TcpStream>)>>> =
+       Arc::new(RwLock::new(HashMap::new()));
+   //<K,V> = <host_socket_add, net_socket_addr>
+   let mut peer_ads : Arc<RwLock<HashMap<SocketAddr, SocketAddr>>> = Arc::new(RwLock::new(HashMap::new()));
+
+   //Ping Table format
+   //=================
+   //HashMap<host_socket, (socket_status, last_update)>
+   //
+   //Socket Status
+   //==============
+   //0 = disconnected. Needs to be collected
+   //1 = alive
+   //2 = pending ping
+   let ping_status : Arc<RwLock<HashMap<SocketAddr, (u8, SystemTime)>>> = Arc::new(RwLock::new(HashMap::new()));
+   let ping_status_clone : Arc<RwLock<HashMap<SocketAddr, (u8, SystemTime)>>> = Arc::clone(&ping_status);
+   let ping_status_clone2 : Arc<RwLock<HashMap<SocketAddr, (u8, SystemTime)>>> = Arc::clone(&ping_status);
+   let ping_peer_ads = Arc::clone(&peer_ads);
+
 
 
    //Calculate the directory hash
@@ -555,13 +349,8 @@ fn main() -> Result<()>{
    let (event_send, event_recv) = mpsc::channel();
    let (change_send, change_recv) = mpsc::channel();
 
-   //Start the file IO thread
-   thread::spawn(move || {
-       start_file_io(event_send, pd_clone, change_recv, &mut files.write().unwrap());
-   });
 
-
-
+   start_file_thread();
 
 
     //Network Protocol
@@ -596,28 +385,6 @@ fn main() -> Result<()>{
     //              |         |
     //              |         |    //                        |
 
-
-   //Peer Vec Format
-   //(read: TcpStream, write: TcpStream, advertied_ip: SocketAddr)
-   let mut peers : Arc<RwLock<HashMap<SocketAddr, (Mutex<TcpStream>, Mutex<TcpStream>)>>> =
-       Arc::new(RwLock::new(HashMap::new()));
-   //<K,V> = <host_socket_add, net_socket_addr>
-   let mut peer_ads : Arc<RwLock<HashMap<SocketAddr, SocketAddr>>> = Arc::new(RwLock::new(HashMap::new()));
-
-
-   //Ping Table format
-   //=================
-   //HashMap<host_socket, (socket_status, last_update)>
-   //
-   //Socket Status
-   //==============
-   //0 = disconnected. Needs to be collected
-   //1 = alive
-   //2 = pending ping
-   let ping_status : Arc<RwLock<HashMap<SocketAddr, (u8, SystemTime)>>> = Arc::new(RwLock::new(HashMap::new()));
-   let ping_status_clone : Arc<RwLock<HashMap<SocketAddr, (u8, SystemTime)>>> = Arc::clone(&ping_status);
-   let ping_status_clone2 : Arc<RwLock<HashMap<SocketAddr, (u8, SystemTime)>>> = Arc::clone(&ping_status);
-   let ping_peer_ads = Arc::clone(&peer_ads);
 
 
 
@@ -760,308 +527,8 @@ fn main() -> Result<()>{
    }
 
 
-   //Start the peer watcher thread\
-   //NOTE: This doesn't work because recv/send command depends on each TcpStream being accessed at
-   //once????
-   //thread::spawn(move || {
-   //     loop{
-   //           let ping_status = ping_status.read().unwrap();
-   //           //Check to see if any pings have expired. If so remove their entries from the 
-   //           for (addr, (read, write)) in peers_clone.read().unwrap().iter() {
-   //               //TODO: remove the peer from the stream list as well
-   //               //If any times are greater than 30 seconds remove the peek
-   //               println!("{:?} {:?}", addr, ping_status);
-   //               let time = ping_status.get(addr);
-
-   //               //If the peer has been registered, but we haven't done a ping cycle with it yet
-   //               if time == None{
-   //                 send_command(PING, 0, &vec![], &mut write.lock().unwrap());
-   //                 continue;
-   //               }
-
-   //               let time = time.unwrap();
-
-   //               println!("elpa: {:?}", SystemTime::now().duration_since(*time).unwrap().as_secs());
-   //               if SystemTime::now().duration_since(*time).unwrap().as_secs() > 5 {
-   //                   println!("Removing {:?}", addr);
-   //                   ping_peer_ads.write().unwrap().remove(addr);
-   //                   peers_clone.write().unwrap().remove(addr);
-   //               }
-   //               else {
-   //                   send_command(PING, 0, &vec![], &mut write.lock().unwrap());
-   //               }
-   //           }
-   //         
-   //         thread::sleep(time::Duration::from_millis(5000));
-   //     }        
-   //});
-
-
    let peers_clone = Arc::clone(&peers);
-   //Thread to run the main event loop / protocol
-   //This thread only deals with peers who have been learned / connected with
-   thread::spawn(move || {
-        let hashes = Arc::clone(&hashes);
-        let hash_cache : HashSet<(Vec<u8>, Vec<u8>)> = HashSet::new();
-        let ping_status = ping_status_clone;
-        //Peers to remove on the next iteration of the loop
-        let mut peers_to_remove :  HashSet<SocketAddr> = HashSet::new();
-
-        println!("=====MAIN EVENT LOOP STARTED=====");
-
-        loop{
-            //Remove all the pears from the event loop
-            if peers_to_remove.len() > 0 {
-                for peer in peers_to_remove.iter() {
-                    peers_clone.write().unwrap().remove(&peer);
-                }
-                peers_to_remove.drain();
-            }
-
-            //println!("{:?}", peers_clone.read().unwrap().iter().len());
-            let mut peer_index = 0;
-            //println!("{}", peers_clone.read().unwrap().iter().len());
-            for (_, (read, write)) in peers_clone.read().unwrap().iter() {
-                //send.lock().unwrap().send(b"asaaa".to_vec());
-                let mut recv = read.lock().unwrap();
-                match recv_command(&mut recv, false){
-                    Ok((opcode, len, data)) => {
-                        //Update the socket's entry in the ping table
-                        ping_status.write().unwrap().insert(recv.peer_addr().unwrap(), (1, SystemTime::now()));
-
-                        //Check for the opcode of the data first
-                        match opcode {
-                            INTRO => {
-                                println!("Received an INTRO");
-                                //if verbose { println!("{} requested the peer list", string_ip);}
-                                
-                                let peers = peers_clone.read().unwrap();
-                                let wr = write;
-                                let mut write = wr.lock().unwrap();
-                                //if verbose { println!("{:?}", peer_ads.read().unwrap());}
-                               
-
-                                let ad_ip_data = data;
-                                //Format 'peer_ads' into bytes
-                                let mut data = vec![];
-                                for (_, peer) in peer_ads.read().unwrap().iter() {
-                                    let mut ip = match peer.ip() {
-                                        IpAddr::V4(ip) => ip.octets().to_vec(),
-                                        IpAddr::V6(ip) => panic!("Protocol currently doesn't support ipv6 :("),
-                                    };
-                                    let port : u16 = peer.port();
-                                    ip.push((port >> 8) as u8);
-                                    ip.push(port as u8);
-                                    data.extend(ip.iter());
-                                }
-
-                                send_command(INTRO_RES, (peer_ads.read().unwrap().len() * 6) as u8,
-                                &data, &mut write);
-                                if debug {println!("Responded with peer list");}
-
-                                let port_number : u16 = ((ad_ip_data[4] as u16) << 8) | ad_ip_data[5] as u16;
-                                let advertised_addr = SocketAddr::from(([ad_ip_data[0],
-                                        ad_ip_data[1], ad_ip_data[2], ad_ip_data[3]], port_number));
-
-                                peer_ads.write().unwrap().insert(write.peer_addr().unwrap(), advertised_addr);
-                                if debug {println!("Added {:?} to the peer_list (INTRO)", advertised_addr);}
-                            },
-                            AD => {
-                                println!("SAVING AD");
-                                let ad_ip_data = data;
-                                let port_number : u16 = ((ad_ip_data[4] as u16) << 8) | ad_ip_data[5] as u16;
-                                let advertised_addr = SocketAddr::from(([ad_ip_data[0],
-                                        ad_ip_data[1], ad_ip_data[2], ad_ip_data[3]], port_number));
-
-                                println!("Waiting for peer_ads");
-                                //Udate the peer and advertisement list with the addr
-                                peer_ads.write().unwrap().insert(write.lock().unwrap().peer_addr().unwrap(), advertised_addr.clone());
-
-                                println!("UPDARTED!!");
-                                if debug {println!("Added {:?} to the peer_list (AD)", advertised_addr);}
-                            },
-                            MSG => {
-                                println!("MSG: {}", String::from_utf8(data.to_vec()).unwrap());
-                            },
-                            PING => {
-                                if debug {println!("Received a PING");}
-                                send_command(PONG, 0, &vec![], &mut write.lock().unwrap()); 
-                                if debug {println!("Sent a PONG");}
-                            }
-                            PONG => {
-                                if debug {println!("Receivied a PONG");}
-                                //Update the ping table
-                                ping_status.write().unwrap().insert(recv.peer_addr().unwrap(), (1, SystemTime::now()));
-                            },
-                            PROJ => {
-                                println!("Responding to project verification");
-                                if data.len() != 128 {
-                                    println!("ERR: Received an invalid PROJ request");
-                                }
-                                let req_proj = data[0..64].to_vec();
-                                let req_file = data[64..128].to_vec();
-
-                                if debug {
-                                    println!("RECV PROJ: {:?}", req_proj);
-                                    println!("RECV FILE: {:?}", req_file);
-                                }
-                                let (proj_hash, file_hash) = get_directory_hash(project_dir.clone(), &mut HashMap::new(), false);
-
-                                //TODO: implement syncronization
-                                if proj_hash == req_proj && req_file == file_hash {
-                                    send_command(PROJ_VER, 1, &vec![1], &mut write.lock().unwrap());
-                                }
-                                else{
-                                    send_command(PROJ_VER, 1, &vec![0], &mut write.lock().unwrap());
-                                }
-
-                                let mut hashes = hashes.write().unwrap();
-                                hashes.0 = proj_hash;
-                                hashes.1 = file_hash;
-                            },
-                            START_SYNC => {
-                                let net_path = String::from_utf8(data.clone()).unwrap();
-                                change_send.send(NetChange::Start(net_path));
-
-                                println!("Starting sync");
-
-                                //TODO: Probably should make this e useful or something. test as a
-                                //POC
-                                let (mut op, mut len, mut data) = recv_command(&mut recv, true).unwrap();
-                                while op != STOP_SYNC {
-
-                                    println!("{:?}, {:?}, {:?}", op, len, data);
-                                    match op {
-                                        SYNC_SAME => {
-                                            change_send.send(NetChange::Same(String::from_utf8(data).unwrap()));
-                                        },
-                                        SYNC_REM => {
-                                            change_send.send(NetChange::Rem(String::from_utf8(data).unwrap()));
-                                        },
-                                        SYNC_ADD => {
-                                            change_send.send(NetChange::Add(String::from_utf8(data).unwrap()));
-                                        },
-                                        _ => {panic!("wtf happend")},
-                                    }
-                                    change_send.send(NetChange::End());
-                                    //https://github.com/rust-lang/rfcs/issues/372
-                                    let (tmp_op, tmp_len, tmp_data) = recv_command(&mut recv, true).unwrap();
-                                    op = tmp_op;
-                                    len = tmp_len;
-                                    data = tmp_data;
-                                }
-                    
-                            },
-                            _ => {
-                                println!("??? Unknown OpCode ???: ({:?}, Length: {:?})", data, len);
-                            }
-                        }
-
-
-
-                        //println!("{:?}", data);
-                    },
-                    Err(ref e) if e.kind() ==  ErrorKind::WouldBlock => {
-                        let now = SystemTime::now();
-                        let read_only = ping_status.read().unwrap().clone();
-
-
-                        //Update the ping table if needed
-                        for (host_sock, (status, last_command)) in read_only.iter() {
-                            let seconds_elapsed = last_command.elapsed().unwrap().as_secs();
-
-                            //If more than 10 seconds have elapsed since the last update then send
-                            //a ping
-                            if seconds_elapsed >= 60 && *status == 1u8{
-                                if debug {println!("Sending a PING to {:?} (host socket) {:?}", host_sock, write.lock().unwrap());}
-                                send_command(PING, 0, &vec![], &mut write.lock().unwrap());
-                                ping_status.write().unwrap().insert(*host_sock, (2, SystemTime::now()));
-                                println!("YEET");
-                            }
-                            //If more than 10 seconds have elapsed since the ping then assume the
-                            //peer is dead
-                            else if seconds_elapsed >= 60 && *status == 2u8 {
-                                println!("NO REPSONSE FROM PEER. REMOVED");
-                                peers_to_remove.insert(host_sock.clone());
-                                //ping_status_clone.write().unwrap().remove(host_sock);
-                                peer_ads.write().unwrap().remove(host_sock);
-                                ping_status.write().unwrap().remove(host_sock);
-                                //ping_status.write().unwrap().insert(*host_sock, (0, SystemTime::now()));
-                                println!("DONE!");
-                            }
-                        }
-                    },
-                    Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => {
-                        println!("Peer has disconnected!");
-                        let host_sock = recv.peer_addr().unwrap();
-
-                        peers_to_remove.insert(host_sock.clone());
-                        peer_ads.write().unwrap().remove(&host_sock);
-                        ping_status.write().unwrap().remove(&host_sock);
-                    }
-                    Err(e) => {
-                        panic!(e);
-                        println!("REMOVING PERE");
-                    }
-                }
-                peer_index += 1;
-            }
-
-
-            //Handle the file change events and sending file differences if there exists any
-            while let Ok(change) = event_recv.try_recv() {
-                //Begin serializing the changeset to the network
-                match change {
-                    NetChange::Start(net_path) => {
-                        //TODO: lol do something about this
-                        if net_path.len() > 255 {
-                            panic!("NET PATH TOO LONG. I DIDN'T THINK OF WHAT TO DO");
-                        }
-
-                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
-                            let mut connection = w.lock().unwrap();
-                            send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes().to_vec(), &mut connection);
-                        }
-                    },
-                    NetChange::Add(diff) => {
-                        //Send the start index and the data to append
-                        let mut data = Vec::new();
-                        data.extend_from_slice(diff.as_bytes());
-                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
-                            let mut connection = w.lock().unwrap();
-                            send_command(SYNC_ADD, (diff.len()).try_into().unwrap(), &data, &mut connection);
-                        }
-                    },
-                    NetChange::Rem(diff) => {
-                        //Send the start index and the data to append
-                        let mut data = Vec::new();
-                        data.extend_from_slice(diff.as_bytes());
-                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
-                            let mut connection = w.lock().unwrap();
-                            send_command(SYNC_REM, (diff.len()).try_into().unwrap(), &data, &mut connection);
-                        }
-                    },
-                    NetChange::Same(diff) => {
-                        //Send the start index and the data to append
-                        let mut data = Vec::new();
-                        data.extend_from_slice(diff.as_bytes());
-                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
-                            let mut connection = w.lock().unwrap();
-                            send_command(SYNC_SAME, (diff.len()).try_into().unwrap(), &data, &mut connection);
-                        }
-                    },
-                    NetChange::End() => {
-                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
-                            let mut connection = w.lock().unwrap();
-                            send_command(STOP_SYNC, 0, &vec![], &mut connection);
-                        }
-                    },
-
-                }
-            }
-            thread::sleep(event_loop_delay);
-       }
-   });
+   start_network_thread();
 
    //Accept every incomming TCP connection on the main thread
    for stream in listener.incoming() {
