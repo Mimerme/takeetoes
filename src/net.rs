@@ -164,3 +164,90 @@ fn verify_file_hash(proj_hash : &Vec<u8>, file_hash : &Vec<u8>, mut peer_stream 
         }
       }
 }
+
+pub fn connect(connecting_ip : &str, binding_ip : &str){
+    debug!("Connecting to {}...", connecting_ip);
+
+    //Connect to the initial client stream
+    let mut stream = TcpStream::connect(connecting_ip.clone())?;
+    let mut stream_clone = stream.try_clone().unwrap();
+
+    //Creating the 'advertised ip' by converting the binding_ip[ into bytes
+    let binding_sock = SocketAddr::from_str(&binding_ip).unwrap();
+    let mut ip = match binding_sock.ip() {
+        IpAddr::V4(ip) => ip.octets().to_vec(),
+        IpAddr::V6(ip) => panic!("Protocol currently doesn't support ipv6 :(")
+    };
+    let port : u16 = binding_sock.port();
+    ip.push((port >> 8) as u8);
+    ip.push(port as u8);
+
+    //Begin asking for the network's peer list
+    //INTRO packet and an advertised peer list         
+    //[opcode (1), data_length (8), ip : port (6)]
+    debug!("Introducing IP {:?}", binding_sock);
+    send_command(INTRO, 6, &ip, &mut stream);
+    //Intro peer responds with peer list
+    let (mut res_op, mut res_len, mut res_data) = recv_command(&mut stream, true).unwrap();
+
+    let mut peer_data = res_data.clone();
+    debug!("Intro Response: {:?}", (res_op, res_len, res_data));
+
+    //Peer List network format is in:
+    //ip1 (4 bytes) | port1 (2 bytes) | ip2 ...  
+    peer_ads.write().unwrap().insert(stream.peer_addr().unwrap(), SocketAddr::from_str(&connecting_ip).unwrap());
+    let structure_hash : &Vec<u8> = &hashes.read().unwrap().0.clone();
+    let content_hash : &Vec<u8> = &hashes.read().unwrap().1.clone();
+
+    debug!("Hash Valid?: {:?}", verify_file_hash(proj_hash, file_hash, &mut stream));
+
+    if verify_file_hash(proj_hash, file_hash, &mut stream) == false {
+        panic!("Different filehash than into node");
+    }
+
+    //Add this initial connection to the peer list
+    ping_status.write().unwrap().insert(stream.peer_addr().unwrap(),(1, SystemTime::now()));
+    peers.write().unwrap().insert(stream.peer_addr().unwrap(), (
+        Mutex::new(stream_clone),
+        Mutex::new(stream)
+    ));
+
+    debug!("Starting peer connections...");
+    // Connect to each of the specified peers
+    for start in (0..res_len.into()).step_by(6) {
+        println!("ONE");
+        //https://stackoverflow.com/questions/50243866/how-do-i-convert-two-u8-primitives-into-a-u16-primitive?noredirect=1&lq=1
+        let port_number : u16 = ((peer_data[start + 4] as u16) << 8) | peer_data[start + 5] as u16;
+        let peer_addr = SocketAddr::from(([peer_data[start], peer_data[start + 1], peer_data[start + 2], peer_data[start + 3]], port_number));
+
+        //Do not allow self referencing peers
+        if binding_sock == peer_addr {
+            println!("Found self referencing peers");
+            continue;
+        }
+
+        //Connect to the specified peer
+        println!("Peer: {:?}", peer_addr);
+        let mut stream = TcpStream::connect(peer_addr).unwrap();
+
+
+        //Send an AD command to add node to the network's peer list 
+        send_command(AD, 6, &ip, &mut stream);
+
+        if verify_file_hash(proj_hash, file_hash, &mut stream) == false {
+            panic!("Different filehash than network");
+        }
+
+
+
+        ping_status.write().unwrap().insert(stream.peer_addr().unwrap(),(1, SystemTime::now()));
+        peer_ads.write().unwrap().insert(stream.peer_addr().unwrap(), peer_addr);
+        peers.write().unwrap().insert(stream.peer_addr().unwrap(), (
+            Mutex::new(stream.try_clone().unwrap()), 
+            Mutex::new(stream),
+        ));
+    }
+
+    println!("Connected to all peers");
+
+}

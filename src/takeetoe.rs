@@ -32,9 +32,9 @@ use std::convert::TryInto;
 use diffy::create_patch;
 
 //Import some functions in the other files
-pub mod net;
+pub mod tak_net;
 pub mod threads;
-use net::{recv_command, send_command};
+use tak_net::{recv_command, send_command};
 use threads::{start_file_thread, start_network_thread};
 
 //A test for difference matching
@@ -547,3 +547,5 @@ fn main() -> Result<()>{
 
     return Ok(());
 }
+
+

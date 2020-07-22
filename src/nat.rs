@@ -15,6 +15,7 @@ use std::boxed::Box;
 
 fn main() {
     let mut listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+    listener.accept();
 
     for stream in listener.incoming() {
        let mut tcp_connection: TcpStream = stream.unwrap();
