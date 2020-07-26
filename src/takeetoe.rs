@@ -25,7 +25,7 @@ struct SimpleLogger;
 
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        true
+        false
     }
 
     fn log(&self, record: &Record) {
@@ -247,22 +247,32 @@ fn start_node(connecting_ip: &str, binding_ip: &str, debug: bool) -> Result<()> 
             //danielnil.com/rust_tip_compairing_strings
             if splits[0] == "peer_list" {
                 println!("!!!Network Peers!!!");
-                println!("{:?}", peer_list.read().unwrap().iter());
+
+                println!("{0: <20} | {1: <20}", "host_address", "net_address");
+
+                for (host_addr, net_addr) in peer_list.read().unwrap().iter() {
+                    println!("{0: <20} | {1: <20}", host_addr, net_addr);
+                }
             } else if splits[0] == "ping" {
                 println!("!!!PING STATUS!!!");
                 println!("Now: {:?}", SystemTime::now());
 
+                println!(
+                    "{0: <10} | {1: <20} | {2: <10}",
+                    "elapsed", "host", "status",
+                );
+
                 for (host, (status, last_update)) in pings.read().unwrap().iter() {
                     println!(
-                        "elapsed={} host={:?} status={} updated={:?}",
+                        "{0: <10} | {1: <20} | {2: <10}",
                         last_update.elapsed().unwrap().as_secs(),
                         host,
                         status,
-                        last_update,
                     );
                 }
             } else if splits[0] == "host_peers" {
                 println!("!!!host_peers!!!");
+                println!("Length = {}", peer_list.read().unwrap().len());
                 println!("{:?}", peers);
             } else {
                 println!("!!! INVALID COMMAND !!!");

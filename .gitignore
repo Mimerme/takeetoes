@@ -1,1 +1,4 @@
 /target
+/old_src
+/src/.*
+/.scratchpads

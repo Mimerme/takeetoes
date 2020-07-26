@@ -18,7 +18,7 @@ use std::{thread, time};
 //How many seconds no activity may go on with another peer before a PING is sent
 const KEEP_ALIVE: usize = 60;
 //How many seconds the network thread should be delayed for
-const NET_DELAY: usize = 5;
+const NET_DELAY: usize = 0;
 
 pub fn start_network_thread(mut peers: Peers, mut peer_list: PeerList, mut ping_status: Pings) {
     //Thread to run the main event loop / protocol
@@ -142,43 +142,7 @@ pub fn start_network_thread(mut peers: Peers, mut peer_list: PeerList, mut ping_
                             }
                         }
                     }
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                        let now = SystemTime::now();
-                        let read_only = ping_status.read().unwrap().clone();
-
-                        //Update the ping table if needed
-                        for (host_sock, (status, last_command)) in read_only.iter() {
-                            let seconds_elapsed = last_command.elapsed().unwrap().as_secs();
-
-                            //If more than 10 seconds have elapsed since the last update then send
-                            //a ping
-                            if seconds_elapsed >= KEEP_ALIVE as u64 && *status == 1u8 {
-                                debug!(
-                                    "Sending a PING to {:?} (host socket) {:?}",
-                                    host_sock,
-                                    write.lock().unwrap()
-                                );
-                                send_command(NetOp::Ping, 0, &vec![], &mut write.lock().unwrap());
-                                ping_status
-                                    .write()
-                                    .unwrap()
-                                    .insert(*host_sock, (2, SystemTime::now()));
-                            }
-                            //If more than 10 seconds have elapsed since the ping then assume the
-                            //peer is dead
-                            else if seconds_elapsed >= 60 && *status == 2u8 {
-                                debug!("NO REPSONSE FROM PEER. REMOVED");
-                                //Since we're iterating over a non-clonable iterator schedule
-                                //sockets to remove when we return to the top of the loop
-                                peers_to_remove.insert(host_sock.clone());
-                                //ping_status_clone.write().unwrap().remove(host_sock);
-                                peers.write().unwrap().remove(host_sock);
-                                ping_status.write().unwrap().remove(host_sock);
-                                //ping_status.write().unwrap().insert(*host_sock, (0, SystemTime::now()));
-                                //println!("DONE!");
-                            }
-                        }
-                    }
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
                     Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => {
                         println!("Peer has disconnected!");
                         let host_sock = recv.peer_addr().unwrap();
@@ -189,10 +153,47 @@ pub fn start_network_thread(mut peers: Peers, mut peer_list: PeerList, mut ping_
                     }
                     Err(e) => {
                         panic!(e);
-                        println!("REMOVING PERE");
                     }
                 }
                 peer_index += 1;
+            }
+
+            let now = SystemTime::now();
+            let read_only = ping_status.read().unwrap().clone();
+
+            //Update the ping table if needed
+            for (host_sock, (status, last_command)) in read_only.iter() {
+                let seconds_elapsed = last_command.elapsed().unwrap().as_secs();
+
+                //If more than 10 seconds have elapsed since the last update then send
+                //a ping
+                if seconds_elapsed >= KEEP_ALIVE as u64 && *status == 1u8 {
+                    let mut write = peers.write().unwrap();
+                    let mut write = &write.get_mut(host_sock).unwrap().1;
+
+                    debug!(
+                        "Sending a PING to {:?} (host socket) {:?}",
+                        host_sock, write,
+                    );
+                    send_command(NetOp::Ping, 0, &vec![], &mut write.lock().unwrap());
+                    ping_status
+                        .write()
+                        .unwrap()
+                        .insert(*host_sock, (2, SystemTime::now()));
+                }
+                //If more than 10 seconds have elapsed since the ping then assume the
+                //peer is dead
+                else if seconds_elapsed >= 60 && *status == 2u8 {
+                    debug!("NO REPSONSE FROM PEER. REMOVED");
+                    //Since we're iterating over a non-clonable iterator schedule
+                    //sockets to remove when we return to the top of the loop
+                    peers_to_remove.insert(host_sock.clone());
+                    //ping_status_clone.write().unwrap().remove(host_sock);
+                    peers.write().unwrap().remove(host_sock);
+                    ping_status.write().unwrap().remove(host_sock);
+                    //ping_status.write().unwrap().insert(*host_sock, (0, SystemTime::now()));
+                    //println!("DONE!");
+                }
             }
 
             thread::sleep(Duration::from_secs(NET_DELAY as u64));
