@@ -3,25 +3,23 @@
 use notify::{Watcher, RecommendedWatcher, RecursiveMode};
 use notify::Config;
 use notify::event::{EventKind, ModifyKind,MetadataKind};
+use crate::net::{NetOp};
 use sha2::{Sha256, Sha512, Digest};
 use std::collections::{HashSet, HashMap, VecDeque};
 use std::{thread, time};
 use std::sync::{Arc, Mutex, RwLock};
-use crate::tak_net::NetOp;
-use std::time::{Duration, SystemTime};
-use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddrV4, SocketAddr, IpAddr};
-use std::io::{Error, ErrorKind};
-use diffy::{create_patch, Patch};
+use std::sync::mpsc::{Sender, Receiver};
+
+use crate::net::NetOp;
 
 //Just sends an event on tx whenever the Metadata of a file in the directory changes
-pub fn start_file_io(changes_out : Sender<(u8, u64, Patch)>, proj_dir : String, net_changes : Receiver<([u8;64], Patch)>, files : &mut HashMap<String, (String, String)>, 
+fn start_file_io(changes_out : Sender<(u8, u64, Patch)>, proj_dir : String, net_changes : Receiver<([u8;64], Patch)>, files : &mut HashMap<String, (String, String)>, 
     version_history : Arc<RwLock<HashMap<[u8;64], (String, [u8;64])>>>) {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher : RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap()).unwrap();
     let mut change_buffer : HashMap<String, HashMap<[u8;64], (Patch, [u8;64])>> = HashMap::new();
 
-    //TODO: Preci:seEvents is broken. Change this section when it gets fixed
     //water.configure(Config::PreciseEvents(true)).unwrap();
     watcher.watch(&proj_dir, RecursiveMode::Recursive).unwrap();
     
@@ -279,59 +277,60 @@ fn start_network_thread() {
                 }
                 peer_index += 1;
             }
+
+
+            //Handle the file change events and sending file differences if there exists any
+            while let Ok(change) = event_recv.try_recv() {
+                //Begin serializing the changeset to the network
+                match change {
+                    NetChange::Start(net_path) => {
+                        //TODO: lol do something about this
+                        if net_path.len() > 255 {
+                            panic!("NET PATH TOO LONG. I DIDN'T THINK OF WHAT TO DO");
+                        }
+
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(START_SYNC, net_path.len() as u8, &net_path.as_bytes().to_vec(), &mut connection);
+                        }
+                    },
+                    NetChange::Add(diff) => {
+                        //Send the start index and the data to append
+                        let mut data = Vec::new();
+                        data.extend_from_slice(diff.as_bytes());
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(SYNC_ADD, (diff.len()).try_into().unwrap(), &data, &mut connection);
+                        }
+                    },
+                    NetChange::Rem(diff) => {
+                        //Send the start index and the data to append
+                        let mut data = Vec::new();
+                        data.extend_from_slice(diff.as_bytes());
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(SYNC_REM, (diff.len()).try_into().unwrap(), &data, &mut connection);
+                        }
+                    },
+                    NetChange::Same(diff) => {
+                        //Send the start index and the data to append
+                        let mut data = Vec::new();
+                        data.extend_from_slice(diff.as_bytes());
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(SYNC_SAME, (diff.len()).try_into().unwrap(), &data, &mut connection);
+                        }
+                    },
+                    NetChange::End() => {
+                        for (_, (r,w)) in peers_clone.read().unwrap().iter() {
+                            let mut connection = w.lock().unwrap();
+                            send_command(STOP_SYNC, 0, &vec![], &mut connection);
+                        }
+                    },
+
+                }
+            }
+            thread::sleep(event_loop_delay);
        }
    });
 }
-
-/* File IO Thread
- * ==============
- * This thread is supposed to be the interface for the project directory's file IO.
- *      > It reads in 'Patch'es from the network when files are changed in the project
- *      directory and saves them for writting when a specific file has been written to (TODO keep
- *      track of open files). Receives from the network channel
- *      > It writes the changes in files to the network as a 'Patch'. Sends to the network
- *      channel
- *
- *  'OUTPUT' referes to data that is to be both sent to the network and written to disk
- *  'INPUT' refers only to data that is received from the network
- *  All communication is done through channels
- *
- */
-
-/*fn start_file_thread(changes_out : Sender<(u8, u64, Patch)>, proj_dir : String, net_changes : Receiver<(u8, u64, Vec<u8>)>, files : &mut Arc<RwLock<HashMap<String, (String, String)>>>, version_history : &mut Arc<RwLock<HashMap<String, (String, String)>>>, proj_dir : &str) {
-
-fn start_file_thread(proj_dir : &str, net_in : Receiver<(Vec<u8>, Patch)>, net_out : Sender<(Vec<u8>, Patch)>){
-    //Start the file IO thread
-    thread::spawn(move || {
-        let (disk_tx, disk_rx) = std::sync::mpsc::channel();
-        let mut file_watcher : RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap()).unwrap();
-        watcher.watch(proj_dir);
-
-        loop {
-            //wait for a change to a file in the directory we're nibutirubg
-            match file_rx.recv() {
-                Ok(recv_event) => {
-                    //First read in the 'OUTPUT' if there exists events
-                    while let Ok(net_patch) = net_in.try_recv() {
-                        let parent_commit = net_patch.0;
-                        let patch = net_patch.1;
-                        let net_path = patch.original();
-
-                        //check to see if we need to insert the patch between two other patches
-                        //
-                        ////if None then we are fine
-                        if change_buffer.get(net_path).get(hash) == None {
-                            change_buffer.get(net_path).get_mut(hash).1 = 
-                            let version_history = version_history.write().unwrap().ge
-                        }
-                        //otherwise begin the rollback
-                        else {
-                        
-                        }
-                    }
-                },
-            }
-        }
-    });
-}
-*/

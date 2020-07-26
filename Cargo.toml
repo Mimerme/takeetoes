@@ -1,5 +1,5 @@
 [package]
-name = "takeetoes"
+name = "takeetoe"
 version = "0.1.0"
 authors = ["mimerme"]
 edition = "2018"
@@ -16,7 +16,7 @@ gitignore = "1.0.6"
 hex-string = "0.1.0"
 diffy = "0.2.0"
 log = "0.4.11"
-
+enumn = "0.1.3"
 
 
 # For observing filesystem events
@@ -25,13 +25,13 @@ notify = "5.0.0-pre.3"
 
 [[bin]]
 name = "punch"
-path="src/punch.rs"
+path="old_src/punch.rs"
 
 [[bin]]
 name = "node"
-path="new_src/takeetoe.rs"
+path="src/takeetoe.rs"
 
 
 [[bin]]
 name = "nat"
-path="src/nat.rs"
+path="old_src/nat.rs"

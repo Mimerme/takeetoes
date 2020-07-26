@@ -1,10 +1,10 @@
 # Takeetoe
-## Create a small p2p network (up to 42 users) and interface with it
+## A runtime environment for quickly and easily creating small p2p network applications. 
 
 ## Summary
-Takeetoe is a basic p2p network protocol that supports up to 42 users. Each node is connected to all other nodes. And there are no private p2p communications, everything is broadcasted.
+Takeetoe is a basic p2p network protocol that supports up to 42 users (changeable). Each node is connected to all other nodes. And there are no private p2p communications, everything is broadcasted.
 "Takeetoe" also refers to the binary produced by this project
-Additional applications can leverage the p2p connecting by connecting a specified 'localhost' TCP port where Takeetoe dumps the network broadcasts
+Applications built on top of the runtime can interface with a p2p network by connecting a TCP port on localhost where Takeetoe does inter-process IO.
 
 ## Usage
 ### Starts the initial Takeetoe Node
