@@ -1,6 +1,6 @@
 //functions to spawn all the threads needed by the node
 //NOTE: if you're looking for the debug thread it's in the main function
-use crate::tak_net::{recv_command, send_command, NetOp};
+use crate::tak_net::{accept_connections, recv_command, send_command, NetOp};
 use crate::{PeerList, Peers, Pings};
 use log::{debug, error, info};
 use notify::event::{EventKind, MetadataKind, ModifyKind};
@@ -12,6 +12,7 @@ use std::convert::TryInto;
 use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use std::{thread, time};
 
@@ -20,10 +21,14 @@ const KEEP_ALIVE: usize = 60;
 //How many seconds the network thread should be delayed for
 const NET_DELAY: usize = 0;
 
-pub fn start_network_thread(mut peers: Peers, mut peer_list: PeerList, mut ping_status: Pings) {
+pub fn start_network_thread(
+    mut peers: Peers,
+    mut peer_list: PeerList,
+    mut ping_status: Pings,
+) -> JoinHandle<()> {
     //Thread to run the main event loop / protocol
     //This thread only deals with peers who have been learned / connected with
-    thread::spawn(move || {
+    return thread::spawn(move || {
         //Peers to remove on the next iteration of the loop
         let mut peers_to_remove: HashSet<SocketAddr> = HashSet::new();
 
@@ -199,4 +204,12 @@ pub fn start_network_thread(mut peers: Peers, mut peer_list: PeerList, mut ping_
             thread::sleep(Duration::from_secs(NET_DELAY as u64));
         }
     });
+}
+
+pub fn start_accept_thread(
+    mut peers: Peers,
+    mut ping_status: Pings,
+    mut listener: TcpListener,
+) -> JoinHandle<()> {
+    return thread::spawn(move || accept_connections(ping_status, peers, listener));
 }

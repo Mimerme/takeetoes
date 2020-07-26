@@ -7,6 +7,7 @@ use std::io::Result;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use std::{thread, time};
 
@@ -19,7 +20,7 @@ use log::{debug, info};
 use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
 use tak_net::connect;
-use threads::start_network_thread;
+use threads::{start_accept_thread, start_network_thread};
 
 struct SimpleLogger;
 
@@ -146,11 +147,19 @@ fn main() -> Result<()> {
 
     init_logger();
 
-    return start_node(&connecting_ip, &binding_ip, debug);
+    let (net_handle, accept_handle) = start_node(&connecting_ip, &binding_ip, debug)?;
+    accept_handle.join();
+    net_handle.join();
+
+    return Ok(());
 }
 
 //Initialize the threads and data-structures here
-fn start_node(connecting_ip: &str, binding_ip: &str, debug: bool) -> Result<()> {
+fn start_node(
+    connecting_ip: &str,
+    binding_ip: &str,
+    debug: bool,
+) -> Result<(JoinHandle<()>, JoinHandle<()>)> {
     info!("Starting Takeetoe node...");
 
     /* Data Structures
@@ -165,7 +174,7 @@ fn start_node(connecting_ip: &str, binding_ip: &str, debug: bool) -> Result<()> 
      * 'ping_status' | keep track of the last responses from a node
      *
      *
-     *   //Ping Table format
+    //Ping Table format
     //=================
     //HashMap<host_socket, (socket_status, last_update)>
     //
@@ -280,10 +289,11 @@ fn start_node(connecting_ip: &str, binding_ip: &str, debug: bool) -> Result<()> 
         });
     }
 
-    threads::start_network_thread(peers.clone(), peer_list.clone(), ping_status.clone());
-    tak_net::accept_connections(ping_status.clone(), peers.clone(), listener);
+    let net_handle =
+        threads::start_network_thread(peers.clone(), peer_list.clone(), ping_status.clone());
+    let accept_handle = threads::start_accept_thread(peers.clone(), ping_status.clone(), listener);
 
-    return Ok(());
+    return Ok((net_handle, accept_handle));
 }
 
 //Basic network tests
