@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
@@ -25,6 +26,10 @@ pub fn start_network_thread(
     mut peers: Peers,
     mut peer_list: PeerList,
     mut ping_status: Pings,
+    mut ret_nodein_recv: Receiver<u8>,
+    mut ipc_nodein_recv: Receiver<u8>,
+    mut ret_nodeout_send: Sender<u8>,
+    mut ipc_nodeout_sen: Sender<u8>,
 ) -> JoinHandle<()> {
     //Thread to run the main event loop / protocol
     //This thread only deals with peers who have been learned / connected with
@@ -210,6 +215,8 @@ pub fn start_ipc_thread(
     mut peers: Peers,
     mut ping_status: Pings,
     mut peer_list: PeerList,
+    mut ipc_nodein_send: Sender<u8>,
+    mut ipc_nodeout_recv: Receiver<u8>,
 ) -> JoinHandle<()> {
     return thread::spawn(move || {});
 }
