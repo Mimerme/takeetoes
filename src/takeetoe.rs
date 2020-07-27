@@ -148,7 +148,9 @@ fn main() -> Result<()> {
 
     init_logger();
 
-    let ((net_handle, accept_handle, ipc_handle), (_, _, _)) =
+    //In the case that the node is run as a binary we can discard all of the channel handles and
+    //extra data structures
+    let ((net_handle, accept_handle, ipc_handle), (_, _, _),(_,_)) =
         start_node(&connecting_ip, &binding_ip, debug)?;
     accept_handle.join();
     net_handle.join();
@@ -164,6 +166,7 @@ fn start_node(
 ) -> Result<(
     (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>),
     (Peers, PeerList, Pings),
+    (Sender<u8>, Receiver<u8>)
 )> {
     info!("Starting Takeetoe node...");
 
@@ -193,8 +196,6 @@ fn start_node(
     let mut peers: Peers = Arc::new(RwLock::new(HashMap::new()));
     let mut peer_list: PeerList = Arc::new(RwLock::new(HashMap::new()));
     let mut ping_status: Pings = Arc::new(RwLock::new(HashMap::new()));
-    let (ret_nodein, ret_nodeout): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
-        std::sync::mpsc::channel();
 
     /* ==========================================================================
      * || Takeetoe Node Overview | Andros Yang        Last Updated: 7/18/2020  ||
@@ -296,15 +297,57 @@ fn start_node(
         });
     }
 
-    let net_handle =
-        threads::start_network_thread(peers.clone(), peer_list.clone(), ping_status.clone());
+    //THREAD CHANNEL CONNECTIONS
+    //
+    //    <MAIN>
+    //       |    
+    //       |    
+    //       |   
+    //       |
+    //       |__________
+    //       |         |
+    //     <NET><ACC><IPC>
+
+    //Initialize the channels
+    //Return channels to interface with the node for other Rust code
+    //If we create mappings to other languages we'll need this
+    //ALSO: remember that channels are unidirectional, not bi directional
+    let (ret_nodein_send, ret_nodein_recv): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+        std::sync::mpsc::channel();
+    let (ret_nodeout_send, ret_nodeout_recv): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+        std::sync::mpsc::channel();
+
+    let (ipc_nodein_send, ipc_nodein_recv): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+        std::sync::mpsc::channel();
+    let (ipc_nodeout_send, ipc_nodeout_recv): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+        std::sync::mpsc::channel();
+
+    //The 'node' is the network thread
+    //therefore it is the thread that...
+    // > empties ret_nodein_out
+    // > populates ret_nodeout_in
+    let net_handle = threads::start_network_thread(
+        peers.clone(),
+        peer_list.clone(),
+        ping_status.clone(),
+        ret_nodein_recv,
+        ipc_nodein_recv
+        ret_nodeout_send,
+        ipc_nodeout_send
+    );
     let accept_handle = threads::start_accept_thread(peers.clone(), ping_status.clone(), listener);
-    let ipc_handle =
-        threads::start_ipc_thread(peers.clone(), ping_status.clone(), peer_list.clone());
+    let ipc_handle = threads::start_ipc_thread(
+        peers.clone(),
+        ping_status.clone(),
+        peer_list.clone(),
+        ipc_nodein_send,
+        ipc_nodeout_recv,
+    );
 
     return Ok((
         (net_handle, accept_handle, ipc_handle),
         (peers.clone(), peer_list.clone(), ping_status.clone()),
+        (ret_nodein_send, ret_nodeout_recv)
     ));
 }
 
