@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Result;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
@@ -147,7 +148,8 @@ fn main() -> Result<()> {
 
     init_logger();
 
-    let (net_handle, accept_handle) = start_node(&connecting_ip, &binding_ip, debug)?;
+    let ((net_handle, accept_handle, ipc_handle), (_, _, _)) =
+        start_node(&connecting_ip, &binding_ip, debug)?;
     accept_handle.join();
     net_handle.join();
 
@@ -159,7 +161,10 @@ fn start_node(
     connecting_ip: &str,
     binding_ip: &str,
     debug: bool,
-) -> Result<(JoinHandle<()>, JoinHandle<()>)> {
+) -> Result<(
+    (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>),
+    (Peers, PeerList, Pings),
+)> {
     info!("Starting Takeetoe node...");
 
     /* Data Structures
@@ -188,6 +193,8 @@ fn start_node(
     let mut peers: Peers = Arc::new(RwLock::new(HashMap::new()));
     let mut peer_list: PeerList = Arc::new(RwLock::new(HashMap::new()));
     let mut ping_status: Pings = Arc::new(RwLock::new(HashMap::new()));
+    let (ret_nodein, ret_nodeout): (Sender<Vec<u8>>, Receiver<Vec<u8>>) =
+        std::sync::mpsc::channel();
 
     /* ==========================================================================
      * || Takeetoe Node Overview | Andros Yang        Last Updated: 7/18/2020  ||
@@ -292,13 +299,23 @@ fn start_node(
     let net_handle =
         threads::start_network_thread(peers.clone(), peer_list.clone(), ping_status.clone());
     let accept_handle = threads::start_accept_thread(peers.clone(), ping_status.clone(), listener);
+    let ipc_handle =
+        threads::start_ipc_thread(peers.clone(), ping_status.clone(), peer_list.clone());
 
-    return Ok((net_handle, accept_handle));
+    return Ok((
+        (net_handle, accept_handle, ipc_handle),
+        (peers.clone(), peer_list.clone(), ping_status.clone()),
+    ));
 }
 
 //Basic network tests
 #[test]
-fn test_2_nodes() {}
+fn test_2_nodes() {
+    let ((n1_net, n1_accept, n1_ipc), (n1_peers, n1_peer_list, n1_pings), (n1_in, n1_out)) =
+        start_node("", "127.0.0.1:7070", false).unwrap();
+    let ((n2_net, n2_accept, n2_ipc), (n2_peers, n2_peer_list, n2_pings), (n2_in, n2_out)) =
+        start_node("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+}
 
 #[test]
 fn test_3_nodes() {}

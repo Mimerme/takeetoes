@@ -206,6 +206,14 @@ pub fn start_network_thread(
     });
 }
 
+pub fn start_ipc_thread(
+    mut peers: Peers,
+    mut ping_status: Pings,
+    mut peer_list: PeerList,
+) -> JoinHandle<()> {
+    return thread::spawn(move || {});
+}
+
 pub fn start_accept_thread(
     mut peers: Peers,
     mut ping_status: Pings,
