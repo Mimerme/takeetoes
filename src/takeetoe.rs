@@ -1,6 +1,7 @@
 #![allow(warnings)]
 
 extern crate argparse;
+use crate::threads::RunOp;
 use argparse::{ArgumentParser, Store, StoreFalse, StoreOption, StoreTrue};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Result;
@@ -224,6 +225,31 @@ fn start_node(
      *
      * */
 
+    //THREAD CHANNEL CONNECTIONS
+    //
+    //    <MAIN>
+    //       |
+    //       |
+    //       |
+    //       |
+    //       |__________
+    //       |         |
+    //     <NET><ACC><IPC>
+
+    //Initialize the channels
+    //Return channels to interface with the node for other Rust code
+    //If we create mappings to other languages we'll need this
+    //ALSO: remember that channels are unidirectional, not bi directional
+    let (ret_nodein_send, ret_nodein_recv): (Sender<Command>, Receiver<Command>) =
+        std::sync::mpsc::channel();
+    let (ret_nodeout_send, ret_nodeout_recv): (Sender<Command>, Receiver<Command>) =
+        std::sync::mpsc::channel();
+
+    let (ipc_nodein_send, ipc_nodein_recv): (Sender<Command>, Receiver<Command>) =
+        std::sync::mpsc::channel();
+    let (ipc_nodeout_send, ipc_nodeout_recv): (Sender<Command>, Receiver<Command>) =
+        std::sync::mpsc::channel();
+
     //Calculate the current directory hash
     //let (proj_hash, file_hash) =
     //    { get_directory_hash(project_dir.clone(), &mut files.write().unwrap(), true) };
@@ -245,6 +271,8 @@ fn start_node(
             peers.clone(),
             peer_list.clone(),
             ping_status.clone(),
+            ret_nodeout_send.clone(),
+            ipc_nodeout_send.clone(),
         );
     }
 
@@ -297,31 +325,6 @@ fn start_node(
         });
     }
 
-    //THREAD CHANNEL CONNECTIONS
-    //
-    //    <MAIN>
-    //       |
-    //       |
-    //       |
-    //       |
-    //       |__________
-    //       |         |
-    //     <NET><ACC><IPC>
-
-    //Initialize the channels
-    //Return channels to interface with the node for other Rust code
-    //If we create mappings to other languages we'll need this
-    //ALSO: remember that channels are unidirectional, not bi directional
-    let (ret_nodein_send, ret_nodein_recv): (Sender<Command>, Receiver<Command>) =
-        std::sync::mpsc::channel();
-    let (ret_nodeout_send, ret_nodeout_recv): (Sender<Command>, Receiver<Command>) =
-        std::sync::mpsc::channel();
-
-    let (ipc_nodein_send, ipc_nodein_recv): (Sender<Command>, Receiver<Command>) =
-        std::sync::mpsc::channel();
-    let (ipc_nodeout_send, ipc_nodeout_recv): (Sender<Command>, Receiver<Command>) =
-        std::sync::mpsc::channel();
-
     //The 'node' is the network thread
     //therefore it is the thread that...
     // > empties ret_nodein_out
@@ -356,8 +359,16 @@ fn start_node(
 fn test_2_nodes() {
     let ((n1_net, n1_accept, n1_ipc), (n1_peers, n1_peer_list, n1_pings), (n1_in, n1_out)) =
         start_node("", "127.0.0.1:7070", false).unwrap();
+
     let ((n2_net, n2_accept, n2_ipc), (n2_peers, n2_peer_list, n2_pings), (n2_in, n2_out)) =
         start_node("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+
+    //The first things the nodes should output is each other's join command
+    let out = n1_out.recv().unwrap();
+    assert_eq!(out, RunOp::OnJoin("127.0.0.1:9090".parse().unwrap()));
+
+    let out2 = n2_out.recv().unwrap();
+    assert_eq!(out2, RunOp::OnJoin("127.0.0.1:7070".parse().unwrap()));
 }
 
 #[test]
@@ -372,6 +383,8 @@ fn test_5_nodes() {}
 //Unit test
 #[test]
 fn test_ipc_com() {}
+#[test]
+fn test_native_com() {}
 
 //Stress tests on the network simulating malicious actors
 #[test]

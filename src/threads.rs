@@ -8,6 +8,7 @@ use notify::event::{EventKind, MetadataKind, ModifyKind};
 use notify::Config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use sha2::{Digest, Sha256, Sha512};
+use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind};
@@ -17,18 +18,21 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use std::{thread, time};
-
 //How many seconds no activity may go on with another peer before a PING is sent
 const KEEP_ALIVE: usize = 60;
 //How many seconds the network thread should be delayed for
 const NET_DELAY: usize = 0;
 
+//Enum used to comm
+#[derive(Debug, PartialEq)]
 pub enum RunOp {
     PingReq,
     PingRes(Vec<(SocketAddr, u8, u64)>),
     Broadcast(Vec<u8>),
+    OnJoin(SocketAddr),
 }
 
+//TODO: old shit. figure out what to remove
 type DataLen = u8;
 pub type Command = RunOp;
 
@@ -59,7 +63,7 @@ pub fn start_network_thread(
         //Peers to remove on the next iteration of the loop
         let mut peers_to_remove: HashSet<SocketAddr> = HashSet::new();
 
-        println!("=====MAIN EVENT LOOP STARTED=====");
+        debug!("=====MAIN EVENT LOOP STARTED=====");
 
         loop {
             //Remove all the pears from the event loop
@@ -129,6 +133,12 @@ pub fn start_network_thread(
                                     .write()
                                     .unwrap()
                                     .insert(write.peer_addr().unwrap(), advertised_addr);
+
+                                //Nodes aren't 'joined' until they either send an
+                                //INTRO or AD
+                                ret_nodeout_send.send(RunOp::OnJoin(advertised_addr));
+                                ipc_nodeout_send.send(RunOp::OnJoin(advertised_addr));
+
                                 debug!(
                                     "Added {:?}'s advertisement address to the peer_list (INTRO)",
                                     advertised_addr
@@ -150,6 +160,11 @@ pub fn start_network_thread(
                                     .unwrap()
                                     .get_mut(&write.lock().unwrap().peer_addr().unwrap())
                                     .unwrap()) = advertised_addr;
+
+                                //Nodes aren't 'joined' until they either send an
+                                //INTRO or AD
+                                ret_nodeout_send.send(RunOp::OnJoin(advertised_addr));
+                                ipc_nodeout_send.send(RunOp::OnJoin(advertised_addr));
 
                                 debug!("Added {:?} to the peer_list (AD)", advertised_addr);
                             }
@@ -269,6 +284,7 @@ pub fn start_network_thread(
             match ipc_nodein_recv.try_recv() {
                 //Handle the special runtime ping request
                 Ok(RunOp::PingReq) => {
+                    println!("iter2");
                     let mut data: Vec<(SocketAddr, u8, u64)> = Vec::new();
 
                     //Each Entry is 6 + 1 + 8 bytes = 15 bytes
@@ -296,8 +312,8 @@ pub fn start_network_thread(
                         );
                     }
                 }
-                Ok(RunOp::PingRes(_)) => panic!("Shouldn't be receiving a PingRes"),
-                Err(e) => panic!(e),
+                Ok(_) => panic!("Shouldn't be receiving a anything else"),
+                Err(e) => { /*continue if there is nothing to do*/ }
             }
 
             //Then handle the native thread
@@ -331,8 +347,8 @@ pub fn start_network_thread(
                         );
                     }
                 }
-                Ok(RunOp::PingRes(_)) => panic!("Shouldn't be receiving a PingRes"),
-                Err(_) => continue,
+                Ok(_) => panic!("Shouldn't be receiving a anything else"),
+                Err(_) => {}
             }
 
             thread::sleep(Duration::from_secs(NET_DELAY as u64));

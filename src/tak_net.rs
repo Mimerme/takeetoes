@@ -1,3 +1,4 @@
+use crate::threads::RunOp;
 use crate::{PeerList, Peers, Pings};
 use diffy::{apply, create_patch, Patch};
 use enumn::N;
@@ -8,6 +9,7 @@ use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::mem::size_of;
 use std::net::{Incoming, IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::str::FromStr;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -170,6 +172,8 @@ pub fn connect(
     mut peers: Peers,
     mut peer_list: PeerList,
     mut pings: Pings,
+    ret_nodeout_send: Sender<RunOp>,
+    ipc_nodeout_send: Sender<RunOp>,
 ) -> Result<()> {
     debug!("Connecting to {}...", connecting_ip);
 
@@ -194,13 +198,13 @@ pub fn connect(
     debug!("Introducing IP {:?}", binding_sock);
     send_command(NetOp::Intro, 6, &ip, &mut stream);
     //Intro peer responds with peer list
-    println!("waiting");
     let (mut res_op, mut res_len, mut res_data) = recv_command(&mut stream, true).unwrap();
 
     let mut peer_data = res_data.clone();
     let host_addr = stream.peer_addr().unwrap();
     debug!("Intro Response: {:?}", (res_op, res_len, res_data));
 
+    //TODO: the connect method doesn't handle the possiblity that the peer goes down
     //Peer List network format is in:
     //ip1 (4 bytes) | port1 (2 bytes) | ip2 ...
     peers
@@ -217,6 +221,9 @@ pub fn connect(
         .write()
         .unwrap()
         .insert(host_stream_addr, (1, SystemTime::now()));
+
+    ret_nodeout_send.send(RunOp::OnJoin(SocketAddr::from_str(&connecting_ip).unwrap()));
+    ipc_nodeout_send.send(RunOp::OnJoin(SocketAddr::from_str(&connecting_ip).unwrap()));
 
     debug!("Starting peer connections...");
     // Connect to each of the specified peers
@@ -263,7 +270,12 @@ pub fn connect(
             (Mutex::new(stream.try_clone().unwrap()), Mutex::new(stream)),
         );
 
-        peer_list.write().unwrap().insert(host_addr, peer_addr);
+        peer_list
+            .write()
+            .unwrap()
+            .insert(host_addr, peer_addr.clone());
+        ret_nodeout_send.send(RunOp::OnJoin(peer_addr));
+        ipc_nodeout_send.send(RunOp::OnJoin(peer_addr));
         println!("Successfully connected to Peer: {:?}", peer_addr);
     }
 
