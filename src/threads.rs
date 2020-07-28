@@ -206,6 +206,61 @@ pub fn start_network_thread(
                 }
             }
 
+            /*
+             * Handle all TakeePC Protocol commands from the IPC thread and native thread
+             *
+             * */
+
+            //Start by handling the ipc thread
+            match ipc_nodein_recv.try_recv() {
+                Ok((opcode, len, data)) => {
+                    //Handle explicit runtime requests
+                    match opcode {
+                        //Formated the same way as INTRO
+                        RunOp::Peers => {
+                            let mut data = vec![];
+                            for (_, peer) in peer_list.read().unwrap().iter() {
+                                let mut ip = match peer.ip() {
+                                    IpAddr::V4(ip) => ip.octets().to_vec(),
+                                    IpAddr::V6(ip) => {
+                                        panic!("Protocol currently doesn't support ipv6 :(")
+                                    }
+                                };
+                                let port: u16 = peer.port();
+                                ip.push((port >> 8) as u8);
+                                ip.push(port as u8);
+                                data.extend(ip.iter());
+                            }
+
+                            ipc_nodeout_send.send((RunOp::Peers, data.len() as DataLen, data));
+                        }
+                        RunOp::Pings => {
+                            let mut data: Vec<u8> = Vec::new();
+
+                            //Each Entry is 6 + 1 + 8 bytes = 15 bytes
+                            //net_addr | status | seconds since epoch
+                            for (host_addr, (status, time)) in ping_status.read().unwrap().iter() {
+                                let peer_list = peer_list.read().unwrap();
+                                let net_addr = peer_list.get(host_addr).unwrap();
+                                data.extend(sock_addr_to_bytes(net_addr.clone()).iter());
+                                data.push(status.clone());
+
+                                let time_since_epoch =
+                                    time.duration_since(SystemTime::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs() as u64;
+
+                                data.extend(time_since_epoch.to_be_bytes().to_vec());
+                            }
+
+                            ipc_nodeout_send.send((RunOp::Pings, data.len() as DataLen, data));
+                        }
+                        _ => {}
+                    }
+                }
+                Err(_) => continue,
+            }
+
             thread::sleep(Duration::from_secs(NET_DELAY as u64));
         }
     });
