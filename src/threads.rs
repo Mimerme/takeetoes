@@ -2,6 +2,7 @@
 //NOTE: if you're looking for the debug thread it's in the main function
 use crate::tak_net::{accept_connections, recv_command, send_command, NetOp};
 use crate::{PeerList, Peers, Pings};
+use enumn::N;
 use log::{debug, error, info};
 use notify::event::{EventKind, MetadataKind, ModifyKind};
 use notify::Config;
@@ -22,14 +23,35 @@ const KEEP_ALIVE: usize = 60;
 //How many seconds the network thread should be delayed for
 const NET_DELAY: usize = 0;
 
+pub enum RunOp {
+    PingReq,
+    PingRes(Vec<(SocketAddr, u8, u64)>),
+    Broadcast(Vec<u8>),
+}
+
+type DataLen = u8;
+pub type Command = RunOp;
+
+fn sock_addr_to_bytes(addr: SocketAddr) -> Vec<u8> {
+    let mut ip = match addr.ip() {
+        IpAddr::V4(ip) => ip.octets().to_vec(),
+        IpAddr::V6(ip) => panic!("Protocol currently doesn't support ipv6 :("),
+    };
+    let port: u16 = addr.port();
+    ip.push((port >> 8) as u8);
+    ip.push(port as u8);
+
+    return ip;
+}
+
 pub fn start_network_thread(
     mut peers: Peers,
     mut peer_list: PeerList,
     mut ping_status: Pings,
-    mut ret_nodein_recv: Receiver<u8>,
-    mut ipc_nodein_recv: Receiver<u8>,
-    mut ret_nodeout_send: Sender<u8>,
-    mut ipc_nodeout_sen: Sender<u8>,
+    mut ret_nodein_recv: Receiver<Command>,
+    mut ipc_nodein_recv: Receiver<Command>,
+    mut ret_nodeout_send: Sender<Command>,
+    mut ipc_nodeout_send: Sender<Command>,
 ) -> JoinHandle<()> {
     //Thread to run the main event loop / protocol
     //This thread only deals with peers who have been learned / connected with
@@ -54,7 +76,7 @@ pub fn start_network_thread(
                 //Get the TcpStream used explicitly for reading from the socket
                 let mut recv = read.lock().unwrap();
                 match recv_command(&mut recv, false) {
-                    Ok((opcode, len, data)) => {
+                    Ok((opcode, len, mut data)) => {
                         //Update the socket's entry in the ping table whenever we receive a new command
                         ping_status
                             .write()
@@ -147,6 +169,32 @@ pub fn start_network_thread(
                                     .unwrap()
                                     .insert(recv.peer_addr().unwrap(), (1, SystemTime::now()));
                             }
+                            //All IPC and other non Takeetoe related network is moved as datagram
+                            //packets.
+                            //If we receive a Broadcast packet then clone and send that information
+                            //along the channels
+                            //This is the __TakeePC Protocol__
+                            Some(NetOp::Broadcast) => {
+                                //TODO: support IPV6
+                                //as an intermidary step modify the data len and data to include
+                                //the net_addr that it came from
+                                let peer_addr = recv.peer_addr().unwrap();
+                                let peer_list = peer_list.read().unwrap();
+                                let peer_addr = peer_list.get(&peer_addr).unwrap();
+                                let mut peer_addr = match peer_addr.ip() {
+                                    IpAddr::V4(ip) => ip.octets().to_vec(),
+                                    IpAddr::V6(ip) => {
+                                        panic!("Protocol currently doesn't support ipv6 :(")
+                                    }
+                                };
+                                peer_addr.append(&mut data);
+
+                                let len = len + 6;
+
+                                debug!("Network BROADCAST received!");
+                                ret_nodeout_send.send(RunOp::Broadcast(data.clone()));
+                                ipc_nodeout_send.send(RunOp::Broadcast(data));
+                            }
                             _ => {
                                 println!("??? Unknown OpCode ???: ({:?}, Length: {:?})", data, len);
                             }
@@ -168,6 +216,12 @@ pub fn start_network_thread(
                 peer_index += 1;
             }
 
+            /*
+             *
+             * Ping table handling begins bellow...
+             *
+             *
+             * */
             let now = SystemTime::now();
             let read_only = ping_status.read().unwrap().clone();
 
@@ -213,51 +267,71 @@ pub fn start_network_thread(
 
             //Start by handling the ipc thread
             match ipc_nodein_recv.try_recv() {
-                Ok((opcode, len, data)) => {
-                    //Handle explicit runtime requests
-                    match opcode {
-                        //Formated the same way as INTRO
-                        RunOp::Peers => {
-                            let mut data = vec![];
-                            for (_, peer) in peer_list.read().unwrap().iter() {
-                                let mut ip = match peer.ip() {
-                                    IpAddr::V4(ip) => ip.octets().to_vec(),
-                                    IpAddr::V6(ip) => {
-                                        panic!("Protocol currently doesn't support ipv6 :(")
-                                    }
-                                };
-                                let port: u16 = peer.port();
-                                ip.push((port >> 8) as u8);
-                                ip.push(port as u8);
-                                data.extend(ip.iter());
-                            }
+                //Handle the special runtime ping request
+                Ok(RunOp::PingReq) => {
+                    let mut data: Vec<(SocketAddr, u8, u64)> = Vec::new();
 
-                            ipc_nodeout_send.send((RunOp::Peers, data.len() as DataLen, data));
-                        }
-                        RunOp::Pings => {
-                            let mut data: Vec<u8> = Vec::new();
+                    //Each Entry is 6 + 1 + 8 bytes = 15 bytes
+                    //net_addr | status | seconds since epoch
+                    for (host_addr, (status, time)) in ping_status.read().unwrap().iter() {
+                        let peer_list = peer_list.read().unwrap();
+                        let net_addr = peer_list.get(host_addr).unwrap();
 
-                            //Each Entry is 6 + 1 + 8 bytes = 15 bytes
-                            //net_addr | status | seconds since epoch
-                            for (host_addr, (status, time)) in ping_status.read().unwrap().iter() {
-                                let peer_list = peer_list.read().unwrap();
-                                let net_addr = peer_list.get(host_addr).unwrap();
-                                data.extend(sock_addr_to_bytes(net_addr.clone()).iter());
-                                data.push(status.clone());
+                        let time_since_epoch = time
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as u64;
 
-                                let time_since_epoch =
-                                    time.duration_since(SystemTime::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs() as u64;
-
-                                data.extend(time_since_epoch.to_be_bytes().to_vec());
-                            }
-
-                            ipc_nodeout_send.send((RunOp::Pings, data.len() as DataLen, data));
-                        }
-                        _ => {}
+                        data.push((net_addr.clone(), *status, time_since_epoch));
+                    }
+                    ipc_nodeout_send.send(RunOp::PingRes(data));
+                }
+                Ok(RunOp::Broadcast(data)) => {
+                    for (_, (read, write)) in peers.read().unwrap().iter() {
+                        send_command(
+                            NetOp::Broadcast,
+                            data.len().try_into().unwrap(),
+                            &data,
+                            &mut write.lock().unwrap(),
+                        );
                     }
                 }
+                Ok(RunOp::PingRes(_)) => panic!("Shouldn't be receiving a PingRes"),
+                Err(e) => panic!(e),
+            }
+
+            //Then handle the native thread
+            match ret_nodein_recv.try_recv() {
+                //Handle the special runtime ping request
+                Ok(RunOp::PingReq) => {
+                    let mut data: Vec<(SocketAddr, u8, u64)> = Vec::new();
+
+                    //Each Entry is 6 + 1 + 8 bytes = 15 bytes
+                    //net_addr | status | seconds since epoch
+                    for (host_addr, (status, time)) in ping_status.read().unwrap().iter() {
+                        let peer_list = peer_list.read().unwrap();
+                        let net_addr = peer_list.get(host_addr).unwrap();
+
+                        let time_since_epoch = time
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as u64;
+
+                        data.push((net_addr.clone(), *status, time_since_epoch));
+                    }
+                    ret_nodeout_send.send(RunOp::PingRes(data));
+                }
+                Ok(RunOp::Broadcast(data)) => {
+                    for (_, (read, write)) in peers.read().unwrap().iter() {
+                        send_command(
+                            NetOp::Broadcast,
+                            data.len().try_into().unwrap(),
+                            &data,
+                            &mut write.lock().unwrap(),
+                        );
+                    }
+                }
+                Ok(RunOp::PingRes(_)) => panic!("Shouldn't be receiving a PingRes"),
                 Err(_) => continue,
             }
 
@@ -270,8 +344,8 @@ pub fn start_ipc_thread(
     mut peers: Peers,
     mut ping_status: Pings,
     mut peer_list: PeerList,
-    mut ipc_nodein_send: Sender<u8>,
-    mut ipc_nodeout_recv: Receiver<u8>,
+    mut ipc_nodein_send: Sender<Command>,
+    mut ipc_nodeout_recv: Receiver<Command>,
 ) -> JoinHandle<()> {
     return thread::spawn(move || {});
 }

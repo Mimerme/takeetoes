@@ -21,7 +21,7 @@ use log::{debug, info};
 use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
 use tak_net::connect;
-use threads::{start_accept_thread, start_network_thread};
+use threads::{start_accept_thread, start_network_thread, Command};
 
 struct SimpleLogger;
 
@@ -166,7 +166,7 @@ fn start_node(
 ) -> Result<(
     (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>),
     (Peers, PeerList, Pings),
-    (Sender<u8>, Receiver<u8>),
+    (Sender<Command>, Receiver<Command>),
 )> {
     info!("Starting Takeetoe node...");
 
@@ -312,12 +312,14 @@ fn start_node(
     //Return channels to interface with the node for other Rust code
     //If we create mappings to other languages we'll need this
     //ALSO: remember that channels are unidirectional, not bi directional
-    let (ret_nodein_send, ret_nodein_recv): (Sender<u8>, Receiver<u8>) = std::sync::mpsc::channel();
-    let (ret_nodeout_send, ret_nodeout_recv): (Sender<u8>, Receiver<u8>) =
+    let (ret_nodein_send, ret_nodein_recv): (Sender<Command>, Receiver<Command>) =
+        std::sync::mpsc::channel();
+    let (ret_nodeout_send, ret_nodeout_recv): (Sender<Command>, Receiver<Command>) =
         std::sync::mpsc::channel();
 
-    let (ipc_nodein_send, ipc_nodein_recv): (Sender<u8>, Receiver<u8>) = std::sync::mpsc::channel();
-    let (ipc_nodeout_send, ipc_nodeout_recv): (Sender<u8>, Receiver<u8>) =
+    let (ipc_nodein_send, ipc_nodein_recv): (Sender<Command>, Receiver<Command>) =
+        std::sync::mpsc::channel();
+    let (ipc_nodeout_send, ipc_nodeout_recv): (Sender<Command>, Receiver<Command>) =
         std::sync::mpsc::channel();
 
     //The 'node' is the network thread
