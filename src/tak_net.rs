@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime};
 //The code bellow should use sizeof() when using this type
 type DataLen = u8;
 type OpCode = u8;
+type Command = (OpCode, DataLen, Vec<u8>);
 
 //Network Opcodes. support for 255
 #[derive(N, Debug)]
@@ -33,7 +34,7 @@ pub enum NetOp {
     VOTE_RES = 11,
 }
 
-pub fn recv_command(connection: &mut TcpStream, block: bool) -> Result<(OpCode, DataLen, Vec<u8>)> {
+pub fn recv_command(connection: &mut TcpStream, block: bool) -> Result<Command> {
     let mut network_header = vec![0; size_of::<OpCode>() + size_of::<DataLen>()];
 
     connection
@@ -129,6 +130,16 @@ pub fn recv_command(connection: &mut TcpStream, block: bool) -> Result<(OpCode, 
         );
         return Ok((opcode, data_len, data.to_vec()));
     }
+}
+
+//Wrapper for send_command()
+pub fn send(command: Command, connection: &mut TcpStream) -> Result<()> {
+    return send_command(
+        NetOp::n(command.0).unwrap(),
+        command.1,
+        &command.2,
+        connection,
+    );
 }
 
 //Send a command to a TCPStream
