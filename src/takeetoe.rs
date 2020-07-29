@@ -14,10 +14,9 @@ use std::time::{Duration, SystemTime};
 use std::{thread, time};
 
 //Import some functions in the other files
-pub mod file;
 pub mod tak_net;
+pub mod tests;
 pub mod threads;
-use file::get_directory_hash;
 use log::{debug, info};
 use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
@@ -160,7 +159,7 @@ fn main() -> Result<()> {
 }
 
 //Initialize the threads and data-structures here
-fn start_node(
+pub fn start_node(
     connecting_ip: &str,
     binding_ip: &str,
     debug: bool,
@@ -352,63 +351,4 @@ fn start_node(
         (peers.clone(), peer_list.clone(), ping_status.clone()),
         (ret_nodein_send, ret_nodeout_recv),
     ));
-}
-
-//Basic network tests
-#[test]
-fn test_2_nodes() {
-    let ((n1_net, n1_accept, n1_ipc), (n1_peers, n1_peer_list, n1_pings), (n1_in, n1_out)) =
-        start_node("", "127.0.0.1:7070", false).unwrap();
-
-    let ((n2_net, n2_accept, n2_ipc), (n2_peers, n2_peer_list, n2_pings), (n2_in, n2_out)) =
-        start_node("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
-
-    //The first things the nodes should output is each other's join command
-    let out = n1_out.recv().unwrap();
-    assert_eq!(out, RunOp::OnJoin("127.0.0.1:9090".parse().unwrap()));
-
-    let out2 = n2_out.recv().unwrap();
-    assert_eq!(out2, RunOp::OnJoin("127.0.0.1:7070".parse().unwrap()));
-}
-
-#[test]
-fn test_3_nodes() {}
-
-#[test]
-fn test_4_nodes() {}
-
-#[test]
-fn test_5_nodes() {}
-
-//Unit test
-#[test]
-fn test_ipc_com() {}
-#[test]
-fn test_native_com() {}
-
-//Stress tests on the network simulating malicious actors
-#[test]
-fn test_mal_invalid_args() {}
-
-#[test]
-fn test_box() {
-    type Test = RwLock<Vec<String>>;
-    let a: Test = RwLock::new(Vec::new());
-
-    a.write().unwrap().push("teswt".to_string());
-    println!("Got write lock");
-    a.read();
-    println!("Got read lock");
-    a.read();
-    println!("Got read lock");
-    a.read();
-    println!("Got read lock");
-    a.read();
-    println!("Got read lock");
-    a.read();
-    println!("Got read lock");
-    a.read();
-    println!("Got read lock");
-    a.write().unwrap();
-    println!("Got last write lock");
 }

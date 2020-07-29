@@ -21,7 +21,7 @@ use std::{thread, time};
 //How many seconds no activity may go on with another peer before a PING is sent
 const KEEP_ALIVE: usize = 60;
 //How many seconds the network thread should be delayed for
-const NET_DELAY: usize = 0;
+const NET_DELAY: usize = 1;
 
 //Enum used to comm
 #[derive(Debug, PartialEq)]
@@ -155,11 +155,10 @@ pub fn start_network_thread(
                                 ));
 
                                 //Update the peer and advertisement list with the addr
-                                (*peer_list
-                                    .write()
-                                    .unwrap()
-                                    .get_mut(&write.lock().unwrap().peer_addr().unwrap())
-                                    .unwrap()) = advertised_addr;
+                                peer_list.write().unwrap().insert(
+                                    write.lock().unwrap().peer_addr().unwrap(),
+                                    advertised_addr,
+                                );
 
                                 //Nodes aren't 'joined' until they either send an
                                 //INTRO or AD
