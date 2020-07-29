@@ -60,20 +60,9 @@ pub fn start_network_thread(
     //Thread to run the main event loop / protocol
     //This thread only deals with peers who have been learned / connected with
     return thread::spawn(move || {
-        //Peers to remove on the next iteration of the loop
-        let mut peers_to_remove: HashSet<SocketAddr> = HashSet::new();
-
         debug!("=====MAIN EVENT LOOP STARTED=====");
 
         loop {
-            //Remove all the pears from the event loop
-            if peers_to_remove.len() > 0 {
-                for peer in peers_to_remove.iter() {
-                    peers.write().unwrap().remove(&peer);
-                }
-                peers_to_remove.drain();
-            }
-
             let mut peer_index = 0;
 
             for (_, (read, write)) in peers.read().unwrap().iter() {
@@ -219,9 +208,11 @@ pub fn start_network_thread(
                         println!("Peer has disconnected!");
                         let host_sock = recv.peer_addr().unwrap();
 
-                        peers_to_remove.insert(host_sock.clone());
+                        peer_list.write().unwrap().remove(&host_sock);
                         peers.write().unwrap().remove(&host_sock);
                         ping_status.write().unwrap().remove(&host_sock);
+
+                        println!("wop");
                     }
                     Err(e) => {
                         panic!(e);
@@ -265,7 +256,6 @@ pub fn start_network_thread(
                     debug!("NO REPSONSE FROM PEER. REMOVED");
                     //Since we're iterating over a non-clonable iterator schedule
                     //sockets to remove when we return to the top of the loop
-                    peers_to_remove.insert(host_sock.clone());
                     //ping_status_clone.write().unwrap().remove(host_sock);
                     peers.write().unwrap().remove(host_sock);
                     ping_status.write().unwrap().remove(host_sock);
