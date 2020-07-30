@@ -1,6 +1,6 @@
 //functions to spawn all the threads needed by the node
 //NOTE: if you're looking for the debug thread it's in the main function
-use crate::tak_net::{accept_connections, recv_command, send_command, NetOp};
+use crate::tak_net::{recv_command, send_command, NetOp};
 use crate::{PeerList, Peers, Pings};
 use enumn::N;
 use log::{debug, error, info};
@@ -12,12 +12,13 @@ use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use std::{thread, time};
+use stoppable_thread::StoppableHandle;
 //How many seconds no activity may go on with another peer before a PING is sent
 const KEEP_ALIVE: usize = 60;
 //How many seconds the network thread should be delayed for
@@ -56,13 +57,13 @@ pub fn start_network_thread(
     mut ipc_nodein_recv: Receiver<Command>,
     mut ret_nodeout_send: Sender<Command>,
     mut ipc_nodeout_send: Sender<Command>,
-) -> JoinHandle<()> {
+) -> StoppableHandle<()> {
     //Thread to run the main event loop / protocol
     //This thread only deals with peers who have been learned / connected with
-    return thread::spawn(move || {
+    return stoppable_thread::spawn(move |stopped| {
         debug!("=====MAIN EVENT LOOP STARTED=====");
 
-        loop {
+        while !stopped.get() {
             let mut peer_index = 0;
 
             for (_, (read, write)) in peers.read().unwrap().iter() {
@@ -342,6 +343,14 @@ pub fn start_network_thread(
 
             thread::sleep(Duration::from_secs(NET_DELAY as u64));
         }
+
+        println!("Shutting down");
+        ////Begin a graceful shutdown
+        //for (_, (_, write)) in peers.read().unwrap().iter() {
+        //    write.lock().unwrap().shutdown(Shutdown::Both);
+        //}
+
+        println!("Net thread shut down");
     });
 }
 
@@ -351,14 +360,51 @@ pub fn start_ipc_thread(
     mut peer_list: PeerList,
     mut ipc_nodein_send: Sender<Command>,
     mut ipc_nodeout_recv: Receiver<Command>,
-) -> JoinHandle<()> {
-    return thread::spawn(move || {});
+) -> StoppableHandle<()> {
+    return stoppable_thread::spawn(move |stopped| while !stopped.get() {});
 }
 
 pub fn start_accept_thread(
     mut peers: Peers,
     mut ping_status: Pings,
     mut listener: TcpListener,
-) -> JoinHandle<()> {
-    return thread::spawn(move || accept_connections(ping_status, peers, listener));
+) -> StoppableHandle<()> {
+    return stoppable_thread::spawn(move |stopped| {
+        listener.set_nonblocking(true);
+
+        //Accept every incomming TCP connection on the main thread
+        for stream in listener.incoming() {
+            if !stopped.get() {
+                match stream {
+                    Ok(stream) => {
+                        debug!("New connection");
+                        //Stream ownership is passed to the thread
+                        let mut tcp_connection: TcpStream = stream;
+                        let peer_addr = tcp_connection.peer_addr().unwrap();
+
+                        //Add to the peer list
+                        ping_status
+                            .write()
+                            .unwrap()
+                            .insert(tcp_connection.peer_addr().unwrap(), (1, SystemTime::now()));
+
+                        //NOTE: peers is set to None here. potential unsafety
+                        peers.write().unwrap().insert(
+                            tcp_connection.peer_addr().unwrap(),
+                            (
+                                Mutex::new(tcp_connection.try_clone().unwrap()),
+                                Mutex::new(tcp_connection),
+                            ),
+                        );
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(e) => {
+                        panic!("IO error: {}", e);
+                    }
+                }
+            } else {
+                return;
+            }
+        }
+    });
 }

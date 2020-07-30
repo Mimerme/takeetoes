@@ -7,6 +7,16 @@ use std::time::{Duration, SystemTime};
 
 extern crate argparse;
 
+#[test]
+fn test_test_one() {
+    thread::spawn(|| loop {});
+}
+
+#[test]
+fn test_test_two() {
+    thread::spawn(|| loop {});
+}
+
 //TODO: becuase the tests use BTreeSet to sort the elements errors involving duplicate peer
 //adertised ips may go through
 //Basic network tests
@@ -24,10 +34,20 @@ fn test_2_nodes() {
 
     let out2 = n2_out.recv().unwrap();
     assert_eq!(out2, RunOp::OnJoin("127.0.0.1:7070".parse().unwrap()));
+
+    n2_net.stop().join();
+    n1_net.stop().join();
+
+    n2_ipc.stop().join();
+    n1_ipc.stop().join();
+
+    n1_accept.stop().join();
+    n2_accept.stop().join();
 }
 
 #[test]
 fn test_3_nodes() {
+    println!("Starting test 3 nodes");
     let ((n1_net, n1_accept, n1_ipc), (n1_peers, n1_peer_list, n1_pings), (n1_in, n1_out)) =
         start_node("", "127.0.0.1:7070", false).unwrap();
 
@@ -81,9 +101,20 @@ fn test_3_nodes() {
         .map(|(x, y)| y.to_string())
         .collect();
 
-    println!("{:?} , {:?}", n1_addrs, n1_peers.read().unwrap().len());
+    /*println!("{:?} , {:?}", n1_addrs, n1_peers.read().unwrap().len());
     println!("{:?} , {:?}", n2_addrs, n2_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n3_addrs, n3_peers.read().unwrap().len());
+    println!("{:?} , {:?}", n3_addrs, n3_peers.read().unwrap().len());*/
+
+    n2_net.stop().join();
+    n1_net.stop().join();
+
+    n3_net.stop().join();
+    n2_ipc.stop().join();
+    n1_ipc.stop().join();
+    n3_ipc.stop().join();
+    n1_accept.stop().join();
+    n2_accept.stop().join();
+    n3_accept.stop().join();
 }
 
 //Test the stability of the nodes by adding and removing
@@ -191,6 +222,19 @@ fn test_4_nodes_stability() {
     println!("{:?} , {:?}", n2_addrs, n2_peers.read().unwrap().len());
     println!("{:?} , {:?}", n3_addrs, n3_peers.read().unwrap().len());
     println!("{:?} , {:?}", n4_addrs, n4_peers.read().unwrap().len());
+
+    n1_net.stop().join();
+    n2_net.stop().join();
+    n4_net.stop().join();
+    n3_net.stop().join();
+    n1_ipc.stop().join();
+    n2_ipc.stop().join();
+    n3_ipc.stop().join();
+    n4_ipc.stop().join();
+    n1_accept.stop().join();
+    n2_accept.stop().join();
+    n3_accept.stop().join();
+    n4_accept.stop().join();
 }
 
 #[test]
@@ -207,7 +251,7 @@ fn test_5_nodes() {
     let ((n4_net, n4_accept, n4_ipc), (n4_peers, n4_peer_list, n4_pings), (n4_in, n4_out)) =
         start_node("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
     let ((n5_net, n5_accept, n5_ipc), (n5_peers, n5_peer_list, n5_pings), (n5_in, n5_out)) =
-        start_node("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
+        start_node("127.0.0.1:4242", "127.0.0.1:6666", false).unwrap();
     let mut n1_connection_count = 0;
     let mut n2_connection_count = 0;
     let mut n3_connection_count = 0;
@@ -230,7 +274,7 @@ fn test_5_nodes() {
         .map(|(x, y)| y.to_string())
         .collect();
 
-    while n2_connection_count < 3 {
+    while n2_connection_count < 4 {
         match n2_out.recv() {
             Ok(RunOp::OnJoin(_)) => {
                 n2_connection_count += 1;
@@ -245,7 +289,7 @@ fn test_5_nodes() {
         .map(|(x, y)| y.to_string())
         .collect();
 
-    while n3_connection_count < 3 {
+    while n3_connection_count < 4 {
         match n3_out.recv() {
             Ok(RunOp::OnJoin(_)) => {
                 n3_connection_count += 1;
@@ -261,7 +305,7 @@ fn test_5_nodes() {
         .map(|(x, y)| y.to_string())
         .collect();
 
-    while n4_connection_count < 3 {
+    while n4_connection_count < 4 {
         match n4_out.recv() {
             Ok(RunOp::OnJoin(_)) => {
                 n4_connection_count += 1;
@@ -277,10 +321,10 @@ fn test_5_nodes() {
         .map(|(x, y)| y.to_string())
         .collect();
 
-    while n5_connection_count < 3 {
-        match n4_out.recv() {
+    while n5_connection_count < 4 {
+        match n5_out.recv() {
             Ok(RunOp::OnJoin(_)) => {
-                n4_connection_count += 1;
+                n5_connection_count += 1;
             }
             _ => {}
         }
@@ -297,6 +341,22 @@ fn test_5_nodes() {
     println!("{:?} , {:?}", n2_addrs, n2_peers.read().unwrap().len());
     println!("{:?} , {:?}", n3_addrs, n3_peers.read().unwrap().len());
     println!("{:?} , {:?}", n4_addrs, n4_peers.read().unwrap().len());
+
+    n1_net.stop().join();
+    n2_net.stop().join();
+    n4_net.stop().join();
+    n5_net.stop().join();
+    n3_net.stop().join();
+    n1_ipc.stop().join();
+    n2_ipc.stop().join();
+    n3_ipc.stop().join();
+    n4_ipc.stop().join();
+    n5_ipc.stop().join();
+    n1_accept.stop().join();
+    n2_accept.stop().join();
+    n3_accept.stop().join();
+    n4_accept.stop().join();
+    n5_accept.stop().join();
 }
 
 //Unit test

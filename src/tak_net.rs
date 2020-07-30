@@ -12,6 +12,7 @@ use std::str::FromStr;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
+use stoppable_thread::SimpleAtomicBool;
 
 //Change how many bytes we reserve in the protocol for the data length.
 //The code bellow should use sizeof() when using this type
@@ -281,29 +282,4 @@ pub fn connect(
 
     debug!("Connected to all peers!");
     return Ok(());
-}
-
-pub fn accept_connections(mut ping_status: Pings, mut peers: Peers, mut listener: TcpListener) {
-    //Accept every incomming TCP connection on the main thread
-    for stream in listener.incoming() {
-        debug!("New connection");
-        //Stream ownership is passed to the thread
-        let mut tcp_connection: TcpStream = stream.unwrap();
-        let peer_addr = tcp_connection.peer_addr().unwrap();
-
-        //Add to the peer list
-        ping_status
-            .write()
-            .unwrap()
-            .insert(tcp_connection.peer_addr().unwrap(), (1, SystemTime::now()));
-
-        //NOTE: peers is set to None here. potential unsafety
-        peers.write().unwrap().insert(
-            tcp_connection.peer_addr().unwrap(),
-            (
-                Mutex::new(tcp_connection.try_clone().unwrap()),
-                Mutex::new(tcp_connection),
-            ),
-        );
-    }
 }

@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use std::{thread, time};
+use stoppable_thread::StoppableHandle;
 
 //Import some functions in the other files
 pub mod tak_net;
@@ -164,7 +165,11 @@ pub fn start_node(
     binding_ip: &str,
     debug: bool,
 ) -> Result<(
-    (JoinHandle<()>, JoinHandle<()>, JoinHandle<()>),
+    (
+        StoppableHandle<()>,
+        StoppableHandle<()>,
+        StoppableHandle<()>,
+    ),
     (Peers, PeerList, Pings),
     (Sender<Command>, Receiver<Command>),
 )> {
@@ -281,45 +286,47 @@ pub fn start_node(
         let peer_list = peer_list.clone();
         let pings = ping_status.clone();
 
-        thread::spawn(move || loop {
-            let mut buffer = String::new();
-            let stdin = std::io::stdin();
-            stdin.read_line(&mut buffer);
-            let splits = buffer.trim().split(" ").collect::<Vec<&str>>();
+        thread::spawn(move || {
+            loop {
+                let mut buffer = String::new();
+                let stdin = std::io::stdin();
+                stdin.read_line(&mut buffer);
+                let splits = buffer.trim().split(" ").collect::<Vec<&str>>();
 
-            //Stdin appends a newline
-            //danielnil.com/rust_tip_compairing_strings
-            if splits[0] == "peer_list" {
-                println!("!!!Network Peers!!!");
+                //Stdin appends a newline
+                //danielnil.com/rust_tip_compairing_strings
+                if splits[0] == "peer_list" {
+                    println!("!!!Network Peers!!!");
 
-                println!("{0: <20} | {1: <20}", "host_address", "net_address");
+                    println!("{0: <20} | {1: <20}", "host_address", "net_address");
 
-                for (host_addr, net_addr) in peer_list.read().unwrap().iter() {
-                    println!("{0: <20} | {1: <20}", host_addr, net_addr);
-                }
-            } else if splits[0] == "ping" {
-                println!("!!!PING STATUS!!!");
-                println!("Now: {:?}", SystemTime::now());
+                    for (host_addr, net_addr) in peer_list.read().unwrap().iter() {
+                        println!("{0: <20} | {1: <20}", host_addr, net_addr);
+                    }
+                } else if splits[0] == "ping" {
+                    println!("!!!PING STATUS!!!");
+                    println!("Now: {:?}", SystemTime::now());
 
-                println!(
-                    "{0: <10} | {1: <20} | {2: <10}",
-                    "elapsed", "host", "status",
-                );
-
-                for (host, (status, last_update)) in pings.read().unwrap().iter() {
                     println!(
                         "{0: <10} | {1: <20} | {2: <10}",
-                        last_update.elapsed().unwrap().as_secs(),
-                        host,
-                        status,
+                        "elapsed", "host", "status",
                     );
+
+                    for (host, (status, last_update)) in pings.read().unwrap().iter() {
+                        println!(
+                            "{0: <10} | {1: <20} | {2: <10}",
+                            last_update.elapsed().unwrap().as_secs(),
+                            host,
+                            status,
+                        );
+                    }
+                } else if splits[0] == "host_peers" {
+                    println!("!!!host_peers!!!");
+                    println!("Length = {}", peer_list.read().unwrap().len());
+                    println!("{:?}", peers);
+                } else {
+                    println!("!!! INVALID COMMAND !!!");
                 }
-            } else if splits[0] == "host_peers" {
-                println!("!!!host_peers!!!");
-                println!("Length = {}", peer_list.read().unwrap().len());
-                println!("{:?}", peers);
-            } else {
-                println!("!!! INVALID COMMAND !!!");
             }
         });
     }
