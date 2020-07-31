@@ -36,6 +36,11 @@ pub enum RunOp {
 //TODO: old shit. figure out what to remove
 type DataLen = u8;
 pub type Command = RunOp;
+pub type NodeHandles = (
+    StoppableHandle<()>,
+    StoppableHandle<()>,
+    StoppableHandle<()>,
+);
 
 fn sock_addr_to_bytes(addr: SocketAddr) -> Vec<u8> {
     let mut ip = match addr.ip() {
@@ -61,10 +66,19 @@ pub fn start_network_thread(
     //Thread to run the main event loop / protocol
     //This thread only deals with peers who have been learned / connected with
     return stoppable_thread::spawn(move |stopped| {
+        let mut peers_to_remove = Vec::new();
+
         debug!("=====MAIN EVENT LOOP STARTED=====");
 
         while !stopped.get() {
             let mut peer_index = 0;
+
+            //Remove the peers before we obtain the lock and result in a deadlock
+            if !peers_to_remove.is_empty() {
+                for peer in peers_to_remove.iter() {
+                    peers.write().unwrap().remove(peer);
+                }
+            }
 
             for (_, (read, write)) in peers.read().unwrap().iter() {
                 //Get the TcpStream used explicitly for reading from the socket
@@ -206,14 +220,16 @@ pub fn start_network_thread(
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
                     Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => {
-                        println!("Peer has disconnected!");
+                        debug!("Peer has disconnected!");
                         let host_sock = recv.peer_addr().unwrap();
 
                         peer_list.write().unwrap().remove(&host_sock);
-                        peers.write().unwrap().remove(&host_sock);
+
+                        //Results in a deadlock
+                        //peers.write().unwrap().remove(&host_sock);
                         ping_status.write().unwrap().remove(&host_sock);
 
-                        println!("wop");
+                        peers_to_remove.push(host_sock);
                     }
                     Err(e) => {
                         panic!(e);
@@ -344,13 +360,13 @@ pub fn start_network_thread(
             thread::sleep(Duration::from_secs(NET_DELAY as u64));
         }
 
-        println!("Shutting down");
+        //println!("Shutting down");
         ////Begin a graceful shutdown
         //for (_, (_, write)) in peers.read().unwrap().iter() {
         //    write.lock().unwrap().shutdown(Shutdown::Both);
         //}
 
-        println!("Net thread shut down");
+        //println!("Net thread shut down");
     });
 }
 
@@ -397,12 +413,15 @@ pub fn start_accept_thread(
                             ),
                         );
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        continue;
+                    }
                     Err(e) => {
                         panic!("IO error: {}", e);
                     }
                 }
             } else {
+                println!("Stopping 2");
                 return;
             }
         }

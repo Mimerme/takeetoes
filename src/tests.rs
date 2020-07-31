@@ -1,5 +1,5 @@
-use crate::start_node;
 use crate::threads::RunOp;
+use crate::Node;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::thread;
@@ -22,11 +22,14 @@ fn test_test_two() {
 //Basic network tests
 #[test]
 fn test_2_nodes() {
-    let ((n1_net, n1_accept, n1_ipc), (n1_peers, n1_peer_list, n1_pings), (n1_in, n1_out)) =
-        start_node("", "127.0.0.1:7070", false).unwrap();
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", false).unwrap();
 
-    let ((n2_net, n2_accept, n2_ipc), (n2_peers, n2_peer_list, n2_pings), (n2_in, n2_out)) =
-        start_node("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+
+    let n1_out = n1.output();
+    let n2_out = n2.output();
 
     //The first things the nodes should output is each other's join command
     let out = n1_out.recv().unwrap();
@@ -35,27 +38,24 @@ fn test_2_nodes() {
     let out2 = n2_out.recv().unwrap();
     assert_eq!(out2, RunOp::OnJoin("127.0.0.1:7070".parse().unwrap()));
 
-    n2_net.stop().join();
-    n1_net.stop().join();
-
-    n2_ipc.stop().join();
-    n1_ipc.stop().join();
-
-    n1_accept.stop().join();
-    n2_accept.stop().join();
+    n1.stop();
+    n2.stop();
 }
 
 #[test]
 fn test_3_nodes() {
-    println!("Starting test 3 nodes");
-    let ((n1_net, n1_accept, n1_ipc), (n1_peers, n1_peer_list, n1_pings), (n1_in, n1_out)) =
-        start_node("", "127.0.0.1:7070", false).unwrap();
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", false).unwrap();
 
-    let ((n2_net, n2_accept, n2_ipc), (n2_peers, n2_peer_list, n2_pings), (n2_in, n2_out)) =
-        start_node("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
 
-    let ((n3_net, n3_accept, n3_ipc), (n3_peers, n3_peer_list, n3_pings), (n3_in, n3_out)) =
-        start_node("127.0.0.1:7070", "127.0.0.1:4242", false).unwrap();
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", false).unwrap();
+
+    let n1_out = n1.output();
+    let n2_out = n2.output();
+    let n3_out = n3.output();
 
     //The first things the nodes should output is each other's join command
     assert_eq!(
@@ -81,56 +81,69 @@ fn test_3_nodes() {
         RunOp::OnJoin("127.0.0.1:9090".parse().unwrap())
     );
 
-    let n1_addrs: BTreeSet<String> = n1_peer_list
+    let n1_addrs: BTreeSet<String> = n1
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
         .map(|(x, y)| y.to_string())
         .collect();
-    let n2_addrs: BTreeSet<String> = n2_peer_list
+    let n2_addrs: BTreeSet<String> = n2
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
         .map(|(x, y)| y.to_string())
         .collect();
 
-    let n3_addrs: BTreeSet<String> = n3_peer_list
+    let n3_addrs: BTreeSet<String> = n3
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
         .map(|(x, y)| y.to_string())
         .collect();
 
-    /*println!("{:?} , {:?}", n1_addrs, n1_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n2_addrs, n2_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n3_addrs, n3_peers.read().unwrap().len());*/
+    println!(
+        "{:?} , {:?}",
+        n1_addrs,
+        n1.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n2_addrs,
+        n2.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n3_addrs,
+        n3.get_peers_arc().read().unwrap().len()
+    );
 
-    n2_net.stop().join();
-    n1_net.stop().join();
-
-    n3_net.stop().join();
-    n2_ipc.stop().join();
-    n1_ipc.stop().join();
-    n3_ipc.stop().join();
-    n1_accept.stop().join();
-    n2_accept.stop().join();
-    n3_accept.stop().join();
+    n1.stop();
+    n2.stop();
+    n3.stop();
 }
 
 //Test the stability of the nodes by adding and removing
 #[test]
 fn test_4_nodes_stability() {
-    let ((n1_net, n1_accept, n1_ipc), (n1_peers, n1_peer_list, n1_pings), (n1_in, n1_out)) =
-        start_node("", "127.0.0.1:7070", false).unwrap();
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", false).unwrap();
 
-    let ((n2_net, n2_accept, n2_ipc), (n2_peers, n2_peer_list, n2_pings), (n2_in, n2_out)) =
-        start_node("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
 
-    let ((n3_net, n3_accept, n3_ipc), (n3_peers, n3_peer_list, n3_pings), (n3_in, n3_out)) =
-        start_node("127.0.0.1:9090", "127.0.0.1:4242", false).unwrap();
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:9090", "127.0.0.1:4242", false).unwrap();
 
-    let ((n4_net, n4_accept, n4_ipc), (n4_peers, n4_peer_list, n4_pings), (n4_in, n4_out)) =
-        start_node("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
+    let mut n4 = Node::new();
+    n4.start("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
+
+    let n1_out = n1.output();
+    let n2_out = n2.output();
+    let n3_out = n3.output();
+    let n4_out = n4.output();
 
     let mut n1_connection_count = 0;
     let mut n2_connection_count = 0;
@@ -145,7 +158,8 @@ fn test_4_nodes_stability() {
         }
     }
 
-    let n1_addrs: BTreeSet<String> = n1_peer_list
+    let n1_addrs: BTreeSet<String> = n1
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
@@ -160,7 +174,8 @@ fn test_4_nodes_stability() {
             _ => {}
         }
     }
-    let n2_addrs: BTreeSet<String> = n2_peer_list
+    let n2_addrs: BTreeSet<String> = n2
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
@@ -176,7 +191,8 @@ fn test_4_nodes_stability() {
         }
     }
 
-    let n3_addrs: BTreeSet<String> = n3_peer_list
+    let n3_addrs: BTreeSet<String> = n3
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
@@ -192,7 +208,8 @@ fn test_4_nodes_stability() {
         }
     }
 
-    let n4_addrs: BTreeSet<String> = n4_peer_list
+    let n4_addrs: BTreeSet<String> = n4
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
@@ -218,47 +235,63 @@ fn test_4_nodes_stability() {
         vec!["127.0.0.1:4242", "127.0.0.1:7070", "127.0.0.1:9090"]
     );
 
-    println!("{:?} , {:?}", n1_addrs, n1_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n2_addrs, n2_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n3_addrs, n3_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n4_addrs, n4_peers.read().unwrap().len());
+    println!(
+        "{:?} , {:?}",
+        n1_addrs,
+        n1.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n2_addrs,
+        n2.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n3_addrs,
+        n3.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n4_addrs,
+        n4.get_peers_arc().read().unwrap().len()
+    );
 
-    n1_net.stop().join();
-    n2_net.stop().join();
-    n4_net.stop().join();
-    n3_net.stop().join();
-    n1_ipc.stop().join();
-    n2_ipc.stop().join();
-    n3_ipc.stop().join();
-    n4_ipc.stop().join();
-    n1_accept.stop().join();
-    n2_accept.stop().join();
-    n3_accept.stop().join();
-    n4_accept.stop().join();
+    n3.stop();
+    n1.stop();
+    n2.stop();
+    n4.stop();
 }
 
 #[test]
 fn test_5_nodes() {
-    let ((n1_net, n1_accept, n1_ipc), (n1_peers, n1_peer_list, n1_pings), (n1_in, n1_out)) =
-        start_node("", "127.0.0.1:7070", false).unwrap();
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", false).unwrap();
 
-    let ((n2_net, n2_accept, n2_ipc), (n2_peers, n2_peer_list, n2_pings), (n2_in, n2_out)) =
-        start_node("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
 
-    let ((n3_net, n3_accept, n3_ipc), (n3_peers, n3_peer_list, n3_pings), (n3_in, n3_out)) =
-        start_node("127.0.0.1:9090", "127.0.0.1:4242", false).unwrap();
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:9090", "127.0.0.1:4242", false).unwrap();
 
-    let ((n4_net, n4_accept, n4_ipc), (n4_peers, n4_peer_list, n4_pings), (n4_in, n4_out)) =
-        start_node("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
-    let ((n5_net, n5_accept, n5_ipc), (n5_peers, n5_peer_list, n5_pings), (n5_in, n5_out)) =
-        start_node("127.0.0.1:4242", "127.0.0.1:6666", false).unwrap();
+    let mut n4 = Node::new();
+    n3.start("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
+
+    let mut n5 = Node::new();
+    n5.start("127.0.0.1:4242", "127.0.0.1:6666", false).unwrap();
+
+    let n1_out = n1.output();
+    let n2_out = n2.output();
+    let n3_out = n3.output();
+    let n4_out = n4.output();
+    let n5_out = n5.output();
+
     let mut n1_connection_count = 0;
     let mut n2_connection_count = 0;
     let mut n3_connection_count = 0;
     let mut n4_connection_count = 0;
     let mut n5_connection_count = 0;
 
-    while n1_connection_count < 3 {
+    while n1_connection_count < 4 {
         match n1_out.recv() {
             Ok(RunOp::OnJoin(_)) => {
                 n1_connection_count += 1;
@@ -267,7 +300,8 @@ fn test_5_nodes() {
         }
     }
 
-    let n1_addrs: BTreeSet<String> = n1_peer_list
+    let n1_addrs: BTreeSet<String> = n1
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
@@ -282,7 +316,8 @@ fn test_5_nodes() {
             _ => {}
         }
     }
-    let n2_addrs: BTreeSet<String> = n2_peer_list
+    let n2_addrs: BTreeSet<String> = n2
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
@@ -298,7 +333,8 @@ fn test_5_nodes() {
         }
     }
 
-    let n3_addrs: BTreeSet<String> = n3_peer_list
+    let n3_addrs: BTreeSet<String> = n3
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
@@ -314,7 +350,8 @@ fn test_5_nodes() {
         }
     }
 
-    let n4_addrs: BTreeSet<String> = n4_peer_list
+    let n4_addrs: BTreeSet<String> = n4
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
@@ -330,33 +367,40 @@ fn test_5_nodes() {
         }
     }
 
-    let n5_addrs: BTreeSet<String> = n4_peer_list
+    let n5_addrs: BTreeSet<String> = n5
+        .get_peer_list_arc()
         .read()
         .unwrap()
         .iter()
         .map(|(x, y)| y.to_string())
         .collect();
 
-    println!("{:?} , {:?}", n1_addrs, n1_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n2_addrs, n2_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n3_addrs, n3_peers.read().unwrap().len());
-    println!("{:?} , {:?}", n4_addrs, n4_peers.read().unwrap().len());
+    println!(
+        "{:?} , {:?}",
+        n1_addrs,
+        n1.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n2_addrs,
+        n2.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n3_addrs,
+        n3.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n4_addrs,
+        n4.get_peers_arc().read().unwrap().len()
+    );
 
-    n1_net.stop().join();
-    n2_net.stop().join();
-    n4_net.stop().join();
-    n5_net.stop().join();
-    n3_net.stop().join();
-    n1_ipc.stop().join();
-    n2_ipc.stop().join();
-    n3_ipc.stop().join();
-    n4_ipc.stop().join();
-    n5_ipc.stop().join();
-    n1_accept.stop().join();
-    n2_accept.stop().join();
-    n3_accept.stop().join();
-    n4_accept.stop().join();
-    n5_accept.stop().join();
+    n1.stop();
+    n2.stop();
+    n3.stop();
+    n4.stop();
+    n5.stop();
 }
 
 //Unit test
