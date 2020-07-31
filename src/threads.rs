@@ -4,10 +4,6 @@ use crate::tak_net::{recv_command, send_command, NetOp};
 use crate::{PeerList, Peers, Pings};
 use enumn::N;
 use log::{debug, error, info};
-use notify::event::{EventKind, MetadataKind, ModifyKind};
-use notify::Config;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use sha2::{Digest, Sha256, Sha512};
 use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
@@ -23,6 +19,8 @@ use stoppable_thread::StoppableHandle;
 const KEEP_ALIVE: usize = 60;
 //How many seconds the network thread should be delayed for
 const NET_DELAY: usize = 1;
+//How many milliseconds the accept thread should wait after each block
+const ACCEPT_DELAY: usize = 100;
 
 //Enum used to comm
 #[derive(Debug, PartialEq)]
@@ -225,7 +223,7 @@ pub fn start_network_thread(
 
                         peer_list.write().unwrap().remove(&host_sock);
 
-                        //Results in a deadlock
+                        //NOTE: the bellow Results in a deadlock
                         //peers.write().unwrap().remove(&host_sock);
                         ping_status.write().unwrap().remove(&host_sock);
 
@@ -390,39 +388,38 @@ pub fn start_accept_thread(
 
         //Accept every incomming TCP connection on the main thread
         for stream in listener.incoming() {
-            if !stopped.get() {
-                match stream {
-                    Ok(stream) => {
-                        debug!("New connection");
-                        //Stream ownership is passed to the thread
-                        let mut tcp_connection: TcpStream = stream;
-                        let peer_addr = tcp_connection.peer_addr().unwrap();
+            match stream {
+                Ok(stream) => {
+                    debug!("New connection");
+                    //Stream ownership is passed to the thread
+                    let mut tcp_connection: TcpStream = stream;
+                    let peer_addr = tcp_connection.peer_addr().unwrap();
 
-                        //Add to the peer list
-                        ping_status
-                            .write()
-                            .unwrap()
-                            .insert(tcp_connection.peer_addr().unwrap(), (1, SystemTime::now()));
+                    //Add to the peer list
+                    ping_status
+                        .write()
+                        .unwrap()
+                        .insert(tcp_connection.peer_addr().unwrap(), (1, SystemTime::now()));
 
-                        //NOTE: peers is set to None here. potential unsafety
-                        peers.write().unwrap().insert(
-                            tcp_connection.peer_addr().unwrap(),
-                            (
-                                Mutex::new(tcp_connection.try_clone().unwrap()),
-                                Mutex::new(tcp_connection),
-                            ),
-                        );
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        continue;
-                    }
-                    Err(e) => {
-                        panic!("IO error: {}", e);
-                    }
+                    //NOTE: peers is set to None here. potential unsafety
+                    peers.write().unwrap().insert(
+                        tcp_connection.peer_addr().unwrap(),
+                        (
+                            Mutex::new(tcp_connection.try_clone().unwrap()),
+                            Mutex::new(tcp_connection),
+                        ),
+                    );
                 }
-            } else {
-                println!("Stopping 2");
-                return;
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if stopped.get() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(ACCEPT_DELAY.try_into().unwrap()));
+                    continue;
+                }
+                Err(e) => {
+                    panic!("IO error: {}", e);
+                }
             }
         }
     });

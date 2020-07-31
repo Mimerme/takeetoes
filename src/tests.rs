@@ -37,6 +37,10 @@ fn test_2_nodes() {
 
     let out2 = n2_out.recv().unwrap();
     assert_eq!(out2, RunOp::OnJoin("127.0.0.1:7070".parse().unwrap()));
+    assert_eq!(n1.get_peers_arc().read().iter().len(), 1);
+    assert_eq!(n2.get_peers_arc().read().iter().len(), 1);
+    assert_eq!(n1.get_pings_arc().read().iter().len(), 1);
+    assert_eq!(n2.get_pings_arc().read().iter().len(), 1);
 
     n1.stop();
     n2.stop();
@@ -274,7 +278,7 @@ fn test_5_nodes() {
     n3.start("127.0.0.1:9090", "127.0.0.1:4242", false).unwrap();
 
     let mut n4 = Node::new();
-    n3.start("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
+    n4.start("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
 
     let mut n5 = Node::new();
     n5.start("127.0.0.1:4242", "127.0.0.1:6666", false).unwrap();
@@ -394,6 +398,11 @@ fn test_5_nodes() {
         "{:?} , {:?}",
         n4_addrs,
         n4.get_peers_arc().read().unwrap().len()
+    );
+    println!(
+        "{:?} , {:?}",
+        n5_addrs,
+        n5.get_peers_arc().read().unwrap().len()
     );
 
     n1.stop();

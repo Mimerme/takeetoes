@@ -300,10 +300,6 @@ impl Node {
         threads.0.stop().join();
         threads.1.stop().join();
         threads.2.stop().join();
-
-        self.input = None;
-        self.output = None;
-        self.threads = None;
     }
 
     fn connect(

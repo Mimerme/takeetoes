@@ -1,9 +1,7 @@
 use crate::threads::RunOp;
 use crate::{PeerList, Peers, Pings};
-use diffy::{apply, create_patch, Patch};
 use enumn::N;
 use log::{debug, error, info};
-use sha2::{Digest, Sha256, Sha512};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::mem::size_of;
