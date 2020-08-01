@@ -13,12 +13,3 @@ jobs:
 cache: cargo
 script:
   - cargo test --bin node test -- --nocapture --test-threads=1
-
-
-
-deploy:
-  provider: releases
-  api_key:
-  file:
-  skip_cleanup: true
-draft: true
