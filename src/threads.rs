@@ -17,10 +17,10 @@ use std::{thread, time};
 use stoppable_thread::StoppableHandle;
 //How many seconds no activity may go on with another peer before a PING is sent
 const KEEP_ALIVE: usize = 60;
-//How many seconds the network thread should be delayed for
-const NET_DELAY: usize = 1;
+//How many milliseconds the network thread should be delayed for
+const NET_DELAY: usize = 250;
 //How many milliseconds the accept thread should wait after each block
-const ACCEPT_DELAY: usize = 100;
+const ACCEPT_DELAY: usize = 250;
 
 //Enum used to comm
 #[derive(Debug, PartialEq)]
@@ -359,7 +359,7 @@ pub fn start_network_thread(
                 Err(_) => {}
             }
 
-            thread::sleep(Duration::from_secs(NET_DELAY as u64));
+            thread::sleep(Duration::from_millis(NET_DELAY as u64));
         }
 
         //println!("Shutting down");
@@ -379,7 +379,7 @@ pub fn start_ipc_thread(
     mut ipc_nodein_send: Sender<Command>,
     mut ipc_nodeout_recv: Receiver<Command>,
 ) -> StoppableHandle<()> {
-    return stoppable_thread::spawn(move |stopped| while !stopped.get() {});
+    return stoppable_thread::spawn(move |stopped| {});
 }
 
 pub fn start_accept_thread(

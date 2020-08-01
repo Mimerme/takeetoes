@@ -1,3 +1,5 @@
+//NOTE: since the nodes use overlapping ports in the tests you need to run the test with
+//--test-threads=1
 use crate::node::NodeOut;
 use crate::threads::RunOp;
 use crate::Node;
@@ -22,7 +24,8 @@ fn wait_joins(out: &Node, joins: usize) {
     let mut connection_count = 0;
     while connection_count < joins {
         match out.output().recv() {
-            Ok(RunOp::OnJoin(_)) => {
+            Ok(RunOp::OnJoin(x)) => {
+                //println!("{:?}", x);
                 connection_count += 1;
             }
             _ => {}
@@ -267,7 +270,7 @@ fn test_4_nodes_stability() {
     n4.stop();
 }
 
-//1 Peer leaves and rejoins
+//2 nodes leave and one rejoins
 #[test]
 fn test_5_nodes_stability() {
     let mut n1 = Node::new();
@@ -375,10 +378,102 @@ fn test_5_nodes_stability() {
         n5.get_state()
     );
 
-    n1.stop();
-    n2.stop();
     n3.stop();
+    n5.stop();
+
+    wait_leaves(&n1, 2);
+    wait_leaves(&n4, 2);
+    wait_leaves(&n2, 2);
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:5555".to_string(), "127.0.0.1:9090".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n1.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:5555".to_string(), "127.0.0.1:7070".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n2.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:7070".to_string(), "127.0.0.1:9090".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n4.get_state()
+    );
+
+    let mut n5 = Node::new();
+    n5.start("127.0.0.1:9090", "127.0.0.1:6969", false).unwrap();
+    wait_joins(&n1, 1);
+    wait_joins(&n2, 1);
+    wait_joins(&n4, 1);
+    wait_joins(&n5, 3);
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:6969".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 3,
+            pings_count: 3
+        },
+        n1.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:6969".to_string(),
+                "127.0.0.1:7070".to_string()
+            ],
+            peers_count: 3,
+            pings_count: 3
+        },
+        n2.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:6969".to_string(),
+                "127.0.0.1:7070".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 3,
+            pings_count: 3
+        },
+        n4.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:7070".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 3,
+            pings_count: 3
+        },
+        n5.get_state()
+    );
+
+    n1.stop();
     n4.stop();
+    n2.stop();
     n5.stop();
 }
 
