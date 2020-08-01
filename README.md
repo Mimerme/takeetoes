@@ -1,4 +1,5 @@
 # Takeetoe
+![Build Status](https://www.travis-ci.com/Mimerme/takeetoes.svg?branch=master)
 ## A runtime environment for quickly and easily creating small p2p network applications. 
 
 ## Summary

@@ -1,3 +1,4 @@
+use crate::node::NodeOut;
 use crate::threads::RunOp;
 use crate::Node;
 use std::collections::BTreeSet;
@@ -7,14 +8,38 @@ use std::time::{Duration, SystemTime};
 
 extern crate argparse;
 
-#[test]
-fn test_test_one() {
-    thread::spawn(|| loop {});
+//A helper struct for comparing node state's to their expected value
+//Node::get_state() returns this
+#[derive(PartialEq, Debug)]
+pub struct NodeState {
+    pub peer_list: Vec<String>,
+    pub peers_count: usize,
+    pub pings_count: usize,
 }
 
-#[test]
-fn test_test_two() {
-    thread::spawn(|| loop {});
+//helper function to wait for a node to be ready in a test
+fn wait_joins(out: &Node, joins: usize) {
+    let mut connection_count = 0;
+    while connection_count < joins {
+        match out.output().recv() {
+            Ok(RunOp::OnJoin(_)) => {
+                connection_count += 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn wait_leaves(out: &Node, leaves: usize) {
+    let mut connection_count = 0;
+    while connection_count < leaves {
+        match out.output().recv() {
+            Ok(RunOp::OnLeave(x)) => {
+                connection_count += 1;
+            }
+            _ => {}
+        }
+    }
 }
 
 //TODO: becuase the tests use BTreeSet to sort the elements errors involving duplicate peer
@@ -31,16 +56,26 @@ fn test_2_nodes() {
     let n1_out = n1.output();
     let n2_out = n2.output();
 
-    //The first things the nodes should output is each other's join command
-    let out = n1_out.recv().unwrap();
-    assert_eq!(out, RunOp::OnJoin("127.0.0.1:9090".parse().unwrap()));
+    wait_joins(&n1, 1);
+    wait_joins(&n2, 1);
 
-    let out2 = n2_out.recv().unwrap();
-    assert_eq!(out2, RunOp::OnJoin("127.0.0.1:7070".parse().unwrap()));
-    assert_eq!(n1.get_peers_arc().read().iter().len(), 1);
-    assert_eq!(n2.get_peers_arc().read().iter().len(), 1);
-    assert_eq!(n1.get_pings_arc().read().iter().len(), 1);
-    assert_eq!(n2.get_pings_arc().read().iter().len(), 1);
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:9090".to_string()],
+            peers_count: 1,
+            pings_count: 1
+        },
+        n1.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:7070".to_string()],
+            peers_count: 1,
+            pings_count: 1
+        },
+        n2.get_state()
+    );
 
     n1.stop();
     n2.stop();
@@ -57,71 +92,35 @@ fn test_3_nodes() {
     let mut n3 = Node::new();
     n3.start("127.0.0.1:7070", "127.0.0.1:4242", false).unwrap();
 
-    let n1_out = n1.output();
-    let n2_out = n2.output();
-    let n3_out = n3.output();
-
-    //The first things the nodes should output is each other's join command
-    assert_eq!(
-        n1_out.recv().unwrap(),
-        RunOp::OnJoin("127.0.0.1:9090".parse().unwrap())
-    );
+    wait_joins(&n1, 2);
+    wait_joins(&n2, 2);
+    wait_joins(&n3, 2);
 
     assert_eq!(
-        n2_out.recv().unwrap(),
-        RunOp::OnJoin("127.0.0.1:7070".parse().unwrap())
-    );
-    assert_eq!(
-        n2_out.recv().unwrap(),
-        RunOp::OnJoin("127.0.0.1:4242".parse().unwrap())
+        NodeState {
+            peer_list: vec!["127.0.0.1:4242".to_string(), "127.0.0.1:9090".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n1.get_state()
     );
 
     assert_eq!(
-        n3_out.recv().unwrap(),
-        RunOp::OnJoin("127.0.0.1:7070".parse().unwrap())
+        NodeState {
+            peer_list: vec!["127.0.0.1:4242".to_string(), "127.0.0.1:7070".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n2.get_state()
     );
+
     assert_eq!(
-        n3_out.recv().unwrap(),
-        RunOp::OnJoin("127.0.0.1:9090".parse().unwrap())
-    );
-
-    let n1_addrs: BTreeSet<String> = n1
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-    let n2_addrs: BTreeSet<String> = n2
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    let n3_addrs: BTreeSet<String> = n3
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    println!(
-        "{:?} , {:?}",
-        n1_addrs,
-        n1.get_peers_arc().read().unwrap().len()
-    );
-    println!(
-        "{:?} , {:?}",
-        n2_addrs,
-        n2.get_peers_arc().read().unwrap().len()
-    );
-    println!(
-        "{:?} , {:?}",
-        n3_addrs,
-        n3.get_peers_arc().read().unwrap().len()
+        NodeState {
+            peer_list: vec!["127.0.0.1:7070".to_string(), "127.0.0.1:9090".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n3.get_state()
     );
 
     n1.stop();
@@ -130,6 +129,7 @@ fn test_3_nodes() {
 }
 
 //Test the stability of the nodes by adding and removing
+//Peers one by one all disconnect
 #[test]
 fn test_4_nodes_stability() {
     let mut n1 = Node::new();
@@ -144,130 +144,132 @@ fn test_4_nodes_stability() {
     let mut n4 = Node::new();
     n4.start("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
 
-    let n1_out = n1.output();
-    let n2_out = n2.output();
-    let n3_out = n3.output();
-    let n4_out = n4.output();
-
-    let mut n1_connection_count = 0;
-    let mut n2_connection_count = 0;
-    let mut n3_connection_count = 0;
-    let mut n4_connection_count = 0;
-    while n1_connection_count < 3 {
-        match n1_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n1_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let n1_addrs: BTreeSet<String> = n1
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    while n2_connection_count < 3 {
-        match n2_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n2_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-    let n2_addrs: BTreeSet<String> = n2
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    while n3_connection_count < 3 {
-        match n3_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n3_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let n3_addrs: BTreeSet<String> = n3
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    while n4_connection_count < 3 {
-        match n4_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n4_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let n4_addrs: BTreeSet<String> = n4
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
+    wait_joins(&n1, 3);
+    wait_joins(&n2, 3);
+    wait_joins(&n3, 3);
+    wait_joins(&n4, 3);
 
     assert_eq!(
-        n1_addrs.iter().collect::<Vec<&String>>(),
-        vec!["127.0.0.1:4242", "127.0.0.1:5555", "127.0.0.1:9090"]
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:4242".to_string(),
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 3,
+            pings_count: 3
+        },
+        n1.get_state()
     );
 
     assert_eq!(
-        n2_addrs.iter().collect::<Vec<&String>>(),
-        vec!["127.0.0.1:4242", "127.0.0.1:5555", "127.0.0.1:7070"]
-    );
-    assert_eq!(
-        n3_addrs.iter().collect::<Vec<&String>>(),
-        vec!["127.0.0.1:5555", "127.0.0.1:7070", "127.0.0.1:9090"]
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:4242".to_string(),
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:7070".to_string()
+            ],
+            peers_count: 3,
+            pings_count: 3
+        },
+        n2.get_state()
     );
 
     assert_eq!(
-        n4_addrs.iter().collect::<Vec<&String>>(),
-        vec!["127.0.0.1:4242", "127.0.0.1:7070", "127.0.0.1:9090"]
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:7070".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 3,
+            pings_count: 3
+        },
+        n3.get_state()
     );
 
-    println!(
-        "{:?} , {:?}",
-        n1_addrs,
-        n1.get_peers_arc().read().unwrap().len()
-    );
-    println!(
-        "{:?} , {:?}",
-        n2_addrs,
-        n2.get_peers_arc().read().unwrap().len()
-    );
-    println!(
-        "{:?} , {:?}",
-        n3_addrs,
-        n3.get_peers_arc().read().unwrap().len()
-    );
-    println!(
-        "{:?} , {:?}",
-        n4_addrs,
-        n4.get_peers_arc().read().unwrap().len()
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:4242".to_string(),
+                "127.0.0.1:7070".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 3,
+            pings_count: 3
+        },
+        n4.get_state()
     );
 
     n3.stop();
+    wait_leaves(&n1, 1);
+    wait_leaves(&n2, 1);
+    wait_leaves(&n4, 1);
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:5555".to_string(), "127.0.0.1:9090".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n1.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:5555".to_string(), "127.0.0.1:7070".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n2.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:7070".to_string(), "127.0.0.1:9090".to_string()],
+            peers_count: 2,
+            pings_count: 2
+        },
+        n4.get_state()
+    );
     n1.stop();
+    wait_leaves(&n2, 1);
+    wait_leaves(&n4, 1);
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:5555".to_string()],
+            peers_count: 1,
+            pings_count: 1
+        },
+        n2.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec!["127.0.0.1:9090".to_string()],
+            peers_count: 1,
+            pings_count: 1
+        },
+        n4.get_state()
+    );
     n2.stop();
+
+    wait_leaves(&n4, 1);
+    assert_eq!(
+        NodeState {
+            peer_list: vec![],
+            peers_count: 0,
+            pings_count: 0
+        },
+        n4.get_state()
+    );
     n4.stop();
 }
 
+//1 Peer leaves and rejoins
 #[test]
-fn test_5_nodes() {
+fn test_5_nodes_stability() {
     let mut n1 = Node::new();
     n1.start("", "127.0.0.1:7070", false).unwrap();
 
@@ -283,126 +285,94 @@ fn test_5_nodes() {
     let mut n5 = Node::new();
     n5.start("127.0.0.1:4242", "127.0.0.1:6666", false).unwrap();
 
-    let n1_out = n1.output();
-    let n2_out = n2.output();
-    let n3_out = n3.output();
-    let n4_out = n4.output();
-    let n5_out = n5.output();
+    wait_joins(&n1, 4);
+    wait_joins(&n2, 4);
+    wait_joins(&n3, 4);
+    wait_joins(&n4, 4);
+    wait_joins(&n5, 4);
 
-    let mut n1_connection_count = 0;
-    let mut n2_connection_count = 0;
-    let mut n3_connection_count = 0;
-    let mut n4_connection_count = 0;
-    let mut n5_connection_count = 0;
-
-    while n1_connection_count < 4 {
-        match n1_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n1_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let n1_addrs: BTreeSet<String> = n1
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    while n2_connection_count < 4 {
-        match n2_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n2_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-    let n2_addrs: BTreeSet<String> = n2
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    while n3_connection_count < 4 {
-        match n3_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n3_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let n3_addrs: BTreeSet<String> = n3
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    while n4_connection_count < 4 {
-        match n4_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n4_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let n4_addrs: BTreeSet<String> = n4
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    while n5_connection_count < 4 {
-        match n5_out.recv() {
-            Ok(RunOp::OnJoin(_)) => {
-                n5_connection_count += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let n5_addrs: BTreeSet<String> = n5
-        .get_peer_list_arc()
-        .read()
-        .unwrap()
-        .iter()
-        .map(|(x, y)| y.to_string())
-        .collect();
-
-    println!(
-        "{:?} , {:?}",
-        n1_addrs,
-        n1.get_peers_arc().read().unwrap().len()
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:4242".to_string(),
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:6666".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 4,
+            pings_count: 4
+        },
+        n1.get_state()
     );
-    println!(
-        "{:?} , {:?}",
-        n2_addrs,
-        n2.get_peers_arc().read().unwrap().len()
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:4242".to_string(),
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:6666".to_string(),
+                "127.0.0.1:7070".to_string()
+            ],
+            peers_count: 4,
+            pings_count: 4
+        },
+        n2.get_state()
     );
-    println!(
-        "{:?} , {:?}",
-        n3_addrs,
-        n3.get_peers_arc().read().unwrap().len()
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:6666".to_string(),
+                "127.0.0.1:7070".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 4,
+            pings_count: 4
+        },
+        n3.get_state()
     );
-    println!(
-        "{:?} , {:?}",
-        n4_addrs,
-        n4.get_peers_arc().read().unwrap().len()
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:4242".to_string(),
+                "127.0.0.1:6666".to_string(),
+                "127.0.0.1:7070".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 4,
+            pings_count: 4
+        },
+        n4.get_state()
     );
-    println!(
-        "{:?} , {:?}",
-        n5_addrs,
-        n5.get_peers_arc().read().unwrap().len()
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:4242".to_string(),
+                "127.0.0.1:6666".to_string(),
+                "127.0.0.1:7070".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 4,
+            pings_count: 4
+        },
+        n4.get_state()
+    );
+
+    assert_eq!(
+        NodeState {
+            peer_list: vec![
+                "127.0.0.1:4242".to_string(),
+                "127.0.0.1:5555".to_string(),
+                "127.0.0.1:7070".to_string(),
+                "127.0.0.1:9090".to_string()
+            ],
+            peers_count: 4,
+            pings_count: 4
+        },
+        n5.get_state()
     );
 
     n1.stop();

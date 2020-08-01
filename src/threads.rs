@@ -29,6 +29,7 @@ pub enum RunOp {
     PingRes(Vec<(SocketAddr, u8, u64)>),
     Broadcast(Vec<u8>),
     OnJoin(SocketAddr),
+    OnLeave(SocketAddr),
 }
 
 //TODO: old shit. figure out what to remove
@@ -73,8 +74,11 @@ pub fn start_network_thread(
 
             //Remove the peers before we obtain the lock and result in a deadlock
             if !peers_to_remove.is_empty() {
-                for peer in peers_to_remove.iter() {
-                    peers.write().unwrap().remove(peer);
+                for peer in peers_to_remove.drain(..) {
+                    peers.write().unwrap().remove(&peer);
+
+                    ret_nodeout_send.send(RunOp::OnLeave(peer.clone()));
+                    ipc_nodeout_send.send(RunOp::OnLeave(peer.clone()));
                 }
             }
 

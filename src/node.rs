@@ -1,7 +1,9 @@
 use crate::tak_net::{recv_command, send_command, NetOp};
+use crate::tests::NodeState;
 use crate::threads;
 use crate::threads::{Command, RunOp};
 use log::{debug, error, info};
+use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Result;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
@@ -39,8 +41,8 @@ pub struct Node {
     peer_list: PeerList,
     pings: Pings,
     threads: Option<NodeHandles>,
-    pub input: Option<NodeIn>,
-    pub output: Option<NodeOut>,
+    input: Option<NodeIn>,
+    output: Option<NodeOut>,
 }
 
 impl Node {
@@ -289,6 +291,28 @@ impl Node {
             ),
             (ret_nodein_send, ret_nodeout_recv),
         ));*/
+    }
+
+    pub fn get_state(&self) -> NodeState {
+        let peer_list = self
+            .get_peer_list_arc()
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(x, y)| y.to_string())
+            .collect::<BTreeSet<String>>()
+            .iter()
+            .map(|x| x.clone())
+            .collect::<Vec<String>>();
+        let peers_count = self.get_peers_arc().read().unwrap().len();
+        let pings_count = self.get_pings_arc().read().unwrap().len();
+
+        //Returns a new struct representing a snapshot of the Node's current state
+        NodeState {
+            peer_list,
+            peers_count,
+            pings_count,
+        }
     }
 
     pub fn stop(mut self) {
