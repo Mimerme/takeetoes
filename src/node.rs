@@ -269,6 +269,7 @@ impl Node {
         let accept_handle =
             threads::start_accept_thread(self.peers.clone(), self.pings.clone(), listener);
         let ipc_handle = threads::start_ipc_thread(
+            "4269".to_string(),
             self.peers.clone(),
             self.pings.clone(),
             self.peer_list.clone(),
@@ -357,7 +358,7 @@ impl Node {
         //INTRO packet and an advertised peer list
         //[opcode (1), data_length (8), ip : port (6)]
         debug!("Introducing IP {:?}", binding_sock);
-        send_command(NetOp::Intro, 6, &ip, &mut stream);
+        send_command(NetOp::Intro as u8, 6, &ip, &mut stream);
         //Intro peer responds with peer list
         let (mut res_op, mut res_len, mut res_data) = recv_command(&mut stream, true).unwrap();
 
@@ -414,7 +415,7 @@ impl Node {
             let host_addr = stream.peer_addr().unwrap();
 
             //Send an AD command to add node to the network's peer list
-            send_command(NetOp::Ad, 6, &ip, &mut stream);
+            send_command(NetOp::Ad as u8, 6, &ip, &mut stream);
 
             //TODO: work on removing this
             //if verify_file_hash(proj_hash, file_hash, &mut stream) == false {

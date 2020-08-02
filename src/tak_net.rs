@@ -14,8 +14,8 @@ use stoppable_thread::SimpleAtomicBool;
 
 //Change how many bytes we reserve in the protocol for the data length.
 //The code bellow should use sizeof() when using this type
-type DataLen = u8;
-type OpCode = u8;
+pub type DataLen = u8;
+pub type OpCode = u8;
 
 //Network Opcodes. support for 255
 #[derive(N, Debug)]
@@ -145,7 +145,7 @@ pub fn recv_command(connection: &mut TcpStream, block: bool) -> Result<(OpCode, 
 
 //Send a command to a TCPStream
 pub fn send_command(
-    opcode: NetOp,
+    opcode: OpCode,
     data_len: DataLen,
     data: &Vec<u8>,
     connection: &mut TcpStream,
@@ -156,7 +156,7 @@ pub fn send_command(
         opcode, data_len, data
     );
     //Add the headers to the outgoing data by concating 3 vectors together
-    let mut op_be = (opcode as OpCode).to_be_bytes().to_vec();
+    let mut op_be = (opcode).to_be_bytes().to_vec();
     let mut dl_be = data_len.to_be_bytes().to_vec();
     dl_be.extend(data.iter());
     op_be.extend(dl_be.iter());

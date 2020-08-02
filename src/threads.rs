@@ -1,6 +1,6 @@
 //functions to spawn all the threads needed by the node
 //NOTE: if you're looking for the debug thread it's in the main function
-use crate::tak_net::{recv_command, send_command, NetOp};
+use crate::tak_net::{recv_command, send_command, DataLen, NetOp, OpCode};
 use crate::{PeerList, Peers, Pings};
 use enumn::N;
 use log::{debug, error, info};
@@ -8,13 +8,14 @@ use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind};
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Incoming, IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use std::{thread, time};
 use stoppable_thread::StoppableHandle;
+
 //How many seconds no activity may go on with another peer before a PING is sent
 const KEEP_ALIVE: usize = 60;
 //How many milliseconds the network thread should be delayed for
@@ -22,18 +23,31 @@ const NET_DELAY: usize = 250;
 //How many milliseconds the accept thread should wait after each block
 const ACCEPT_DELAY: usize = 250;
 
-//Enum used to comm
+//How many milliseconds the two IPC threads should wait after each block
+const IPC_DELAY: usize = 250;
+
+//Enum used to communicate between channels in the runtime
 #[derive(Debug, PartialEq)]
+#[repr(u8)]
 pub enum RunOp {
     PingReq,
     PingRes(Vec<(SocketAddr, u8, u64)>),
-    Broadcast(Vec<u8>),
+    Broadcast(SocketAddr, Vec<u8>),
     OnJoin(SocketAddr),
     OnLeave(SocketAddr),
 }
 
-//TODO: old shit. figure out what to remove
-type DataLen = u8;
+//Enum used to communicate with other processes
+#[derive(N, Debug)]
+#[repr(u8)]
+pub enum IpcOp {
+    PingReq = 1,
+    PingRes = 2,
+    Broadcast = 3,
+    OnJoin = 4,
+    OnLeave = 5,
+}
+
 pub type Command = RunOp;
 pub type NodeHandles = (
     StoppableHandle<()>,
@@ -41,7 +55,7 @@ pub type NodeHandles = (
     StoppableHandle<()>,
 );
 
-fn sock_addr_to_bytes(addr: SocketAddr) -> Vec<u8> {
+pub fn sock_addr_to_bytes(addr: SocketAddr) -> Vec<u8> {
     let mut ip = match addr.ip() {
         IpAddr::V4(ip) => ip.octets().to_vec(),
         IpAddr::V6(ip) => panic!("Protocol currently doesn't support ipv6 :("),
@@ -121,7 +135,7 @@ pub fn start_network_thread(
                                 }
 
                                 send_command(
-                                    NetOp::IntroRes,
+                                    NetOp::IntroRes as u8,
                                     (peer_list.read().unwrap().len() * 6) as u8,
                                     &data,
                                     &mut write,
@@ -178,7 +192,12 @@ pub fn start_network_thread(
                             }
                             Some(NetOp::Ping) => {
                                 debug!("Received a PING");
-                                send_command(NetOp::Pong, 0, &vec![], &mut write.lock().unwrap());
+                                send_command(
+                                    NetOp::Pong as u8,
+                                    0,
+                                    &vec![],
+                                    &mut write.lock().unwrap(),
+                                );
                                 debug!("Sent a PONG");
                             }
                             Some(NetOp::Pong) => {
@@ -195,25 +214,13 @@ pub fn start_network_thread(
                             //along the channels
                             //This is the __TakeePC Protocol__
                             Some(NetOp::Broadcast) => {
-                                //TODO: support IPV6
-                                //as an intermidary step modify the data len and data to include
-                                //the net_addr that it came from
                                 let peer_addr = recv.peer_addr().unwrap();
                                 let peer_list = peer_list.read().unwrap();
                                 let peer_addr = peer_list.get(&peer_addr).unwrap();
-                                let mut peer_addr = match peer_addr.ip() {
-                                    IpAddr::V4(ip) => ip.octets().to_vec(),
-                                    IpAddr::V6(ip) => {
-                                        panic!("Protocol currently doesn't support ipv6 :(")
-                                    }
-                                };
-                                peer_addr.append(&mut data);
-
-                                let len = len + 6;
 
                                 debug!("Network BROADCAST received!");
-                                ret_nodeout_send.send(RunOp::Broadcast(data.clone()));
-                                ipc_nodeout_send.send(RunOp::Broadcast(data));
+                                ret_nodeout_send.send(RunOp::Broadcast(*peer_addr, data.clone()));
+                                ipc_nodeout_send.send(RunOp::Broadcast(*peer_addr, data));
                             }
                             _ => {
                                 println!("??? Unknown OpCode ???: ({:?}, Length: {:?})", data, len);
@@ -263,7 +270,7 @@ pub fn start_network_thread(
                         "Sending a PING to {:?} (host socket) {:?}",
                         host_sock, write,
                     );
-                    send_command(NetOp::Ping, 0, &vec![], &mut write.lock().unwrap());
+                    send_command(NetOp::Ping as u8, 0, &vec![], &mut write.lock().unwrap());
                     ping_status
                         .write()
                         .unwrap()
@@ -310,10 +317,10 @@ pub fn start_network_thread(
                     }
                     ipc_nodeout_send.send(RunOp::PingRes(data));
                 }
-                Ok(RunOp::Broadcast(data)) => {
+                Ok(RunOp::Broadcast(peer, data)) => {
                     for (_, (read, write)) in peers.read().unwrap().iter() {
                         send_command(
-                            NetOp::Broadcast,
+                            NetOp::Broadcast as u8,
                             data.len().try_into().unwrap(),
                             &data,
                             &mut write.lock().unwrap(),
@@ -345,10 +352,10 @@ pub fn start_network_thread(
                     }
                     ret_nodeout_send.send(RunOp::PingRes(data));
                 }
-                Ok(RunOp::Broadcast(data)) => {
+                Ok(RunOp::Broadcast(peer, data)) => {
                     for (_, (read, write)) in peers.read().unwrap().iter() {
                         send_command(
-                            NetOp::Broadcast,
+                            NetOp::Broadcast as u8,
                             data.len().try_into().unwrap(),
                             &data,
                             &mut write.lock().unwrap(),
@@ -373,13 +380,145 @@ pub fn start_network_thread(
 }
 
 pub fn start_ipc_thread(
+    port: String,
     mut peers: Peers,
     mut ping_status: Pings,
     mut peer_list: PeerList,
     mut ipc_nodein_send: Sender<Command>,
     mut ipc_nodeout_recv: Receiver<Command>,
 ) -> StoppableHandle<()> {
-    return stoppable_thread::spawn(move |stopped| {});
+    return stoppable_thread::spawn(move |stopped| {
+        let ipc_listener = TcpListener::bind(format!("127.0.0.1:{}", port)).unwrap();
+
+        ipc_listener.set_nonblocking(true);
+
+        let mut clients = HashMap::new();
+
+        //First handle any incomming connections
+        for mut connection in ipc_listener.incoming() {
+            if stopped.get() {
+                break;
+            }
+
+            match connection {
+                Ok(stream) => {
+                    stream.set_nonblocking(true);
+                    clients.insert(stream.peer_addr().unwrap(), stream);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    //If there are no clients to process then handle incoming node IO
+                    for (addr, stream) in clients.iter_mut() {
+                        //Forward all of nodeOut to the each net stream
+                        while let Ok(command) = ipc_nodeout_recv.try_recv() {
+                            let mut buf = Vec::new();
+
+                            match command {
+                                //Everything in bound should be of proper size so no need to
+                                //resize
+                                //Begin all the serialization garbage
+                                RunOp::Broadcast(peer, msg) => {
+                                    let mut ip = match peer.ip() {
+                                        IpAddr::V4(ip) => ip.octets().to_vec(),
+                                        IpAddr::V6(ip) => {
+                                            panic!("Protocol currently doesn't support ipv6 :(")
+                                        }
+                                    };
+                                    let port: u16 = peer.port();
+                                    ip.push((port >> 8) as u8);
+                                    ip.push(port as u8);
+                                    buf.extend(ip.iter());
+                                    buf.extend(msg);
+
+                                    send_command(
+                                        IpcOp::Broadcast as OpCode,
+                                        buf.len() as DataLen,
+                                        &buf,
+                                        stream,
+                                    )
+                                    .unwrap()
+                                }
+                                RunOp::OnJoin(addr) => {
+                                    buf.extend(sock_addr_to_bytes(addr));
+                                    send_command(
+                                        IpcOp::OnJoin as OpCode,
+                                        buf.len() as DataLen,
+                                        &buf,
+                                        stream,
+                                    )
+                                    .unwrap()
+                                }
+                                RunOp::OnLeave(addr) => {
+                                    buf.extend(sock_addr_to_bytes(addr));
+                                    send_command(
+                                        IpcOp::OnLeave as OpCode,
+                                        buf.len() as DataLen,
+                                        &buf,
+                                        stream,
+                                    )
+                                    .unwrap()
+                                }
+
+                                RunOp::PingRes(res) => {
+                                    for (peer, ping_status, epoch_time) in res.iter() {
+                                        buf.append(&mut sock_addr_to_bytes(*peer));
+                                        buf.push(*ping_status);
+                                        buf.append(&mut epoch_time.to_be_bytes().to_vec());
+                                    }
+
+                                    send_command(
+                                        IpcOp::PingRes as OpCode,
+                                        buf.len() as DataLen,
+                                        &buf,
+                                        stream,
+                                    )
+                                    .unwrap()
+                                }
+
+                                x => panic!("Received {:?} on \'IPC out\'"),
+                            }
+                        }
+
+                        //Forward all of the incoming data on the stream to nodeIn
+                        while let Ok((opcode, datalen, data)) = recv_command(stream, false) {
+                            match IpcOp::n(opcode) {
+                                Some(IpcOp::PingReq) => {
+                                    ipc_nodein_send.send(RunOp::PingReq);
+                                }
+                                Some(IpcOp::Broadcast) => {
+                                    ipc_nodein_send.send(RunOp::Broadcast(
+                                        be_bytes_to_ip(&data[0..6]),
+                                        data[6..datalen as usize].to_vec(),
+                                    ));
+                                }
+                                _ => panic!("Received {:?} on \'IPC in\'"),
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    panic!(e);
+                }
+            }
+
+            /*match ipc_nodeout_recv.try_recv() {
+                Ok(command) => {}
+                Err(_) => {}
+            }*/
+        }
+    });
+}
+
+fn be_bytes_to_ip(data: &[u8]) -> SocketAddr {
+    //TODO: support ipv6
+    let peer_data = &data[0..6];
+    let port_number: u16 = ((peer_data[4] as u16) << 8) | peer_data[5] as u16;
+
+    let peer_addr = SocketAddr::from((
+        [peer_data[0], peer_data[1], peer_data[2], peer_data[3]],
+        port_number,
+    ));
+
+    return peer_addr;
 }
 
 pub fn start_accept_thread(
