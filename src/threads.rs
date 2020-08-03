@@ -1,5 +1,6 @@
 //functions to spawn all the threads needed by the node
 //NOTE: if you're looking for the debug thread it's in the main function
+//
 use crate::tak_net::{recv_command, send_command, DataLen, NetOp, OpCode};
 use crate::{PeerList, Peers, Pings};
 use enumn::N;
@@ -9,7 +10,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind};
 use std::net::{Incoming, IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
-use std::sync::mpsc::{Receiver, Sender};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
@@ -22,7 +25,6 @@ const KEEP_ALIVE: usize = 60;
 const NET_DELAY: usize = 250;
 //How many milliseconds the accept thread should wait after each block
 const ACCEPT_DELAY: usize = 250;
-
 //How many milliseconds the two IPC threads should wait after each block
 const IPC_DELAY: usize = 250;
 
@@ -75,6 +77,7 @@ pub fn start_network_thread(
     mut ipc_nodein_recv: Receiver<Command>,
     mut ret_nodeout_send: Sender<Command>,
     mut ipc_nodeout_send: Sender<Command>,
+    rdy_flag: Arc<AtomicU8>,
 ) -> StoppableHandle<()> {
     //Thread to run the main event loop / protocol
     //This thread only deals with peers who have been learned / connected with
@@ -82,6 +85,11 @@ pub fn start_network_thread(
         let mut peers_to_remove = Vec::new();
 
         debug!("=====MAIN EVENT LOOP STARTED=====");
+
+        //TODO: this might not actually set the thread state as rdy on rlly slow machines???
+        //Set the thread state as rdy for the node thread from which this was called
+        let flag = rdy_flag.load(Ordering::Relaxed) | 0b00000100;
+        rdy_flag.store(flag, Ordering::Relaxed);
 
         while !stopped.get() {
             let mut peer_index = 0;
@@ -299,7 +307,6 @@ pub fn start_network_thread(
             match ipc_nodein_recv.try_recv() {
                 //Handle the special runtime ping request
                 Ok(RunOp::PingReq) => {
-                    println!("iter2");
                     let mut data: Vec<(SocketAddr, u8, u64)> = Vec::new();
 
                     //Each Entry is 6 + 1 + 8 bytes = 15 bytes
@@ -386,6 +393,7 @@ pub fn start_ipc_thread(
     mut peer_list: PeerList,
     mut ipc_nodein_send: Sender<Command>,
     mut ipc_nodeout_recv: Receiver<Command>,
+    rdy_flag: Arc<AtomicU8>,
 ) -> StoppableHandle<()> {
     return stoppable_thread::spawn(move |stopped| {
         let ipc_listener = TcpListener::bind(format!("127.0.0.1:{}", port)).unwrap();
@@ -393,6 +401,12 @@ pub fn start_ipc_thread(
         ipc_listener.set_nonblocking(true);
 
         let mut clients = HashMap::new();
+        let mut peers_to_remove: Vec<SocketAddr> = Vec::new();
+
+        //TODO: this might not actually set the thread state as rdy on rlly slow machines???
+        //Set the thread state as rdy for the node thread from which this was called
+        let flag = rdy_flag.load(Ordering::Relaxed) | 0b00000010;
+        rdy_flag.store(flag, Ordering::Relaxed);
 
         //First handle any incomming connections
         for mut connection in ipc_listener.incoming() {
@@ -406,109 +420,142 @@ pub fn start_ipc_thread(
                     clients.insert(stream.peer_addr().unwrap(), stream);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    //If there are no clients to process then handle incoming node IO
-                    for (addr, stream) in clients.iter_mut() {
-                        //Forward all of nodeOut to the each net stream
-                        while let Ok(command) = ipc_nodeout_recv.try_recv() {
-                            let mut buf = Vec::new();
-
-                            match command {
-                                //Everything in bound should be of proper size so no need to
-                                //resize
-                                //Begin all the serialization garbage
-                                RunOp::Broadcast(peer, msg) => {
-                                    let mut ip = match peer.ip() {
-                                        IpAddr::V4(ip) => ip.octets().to_vec(),
-                                        IpAddr::V6(ip) => {
-                                            panic!("Protocol currently doesn't support ipv6 :(")
-                                        }
-                                    };
-                                    let port: u16 = peer.port();
-                                    ip.push((port >> 8) as u8);
-                                    ip.push(port as u8);
-                                    buf.extend(ip.iter());
-                                    buf.extend(msg);
-
-                                    send_command(
-                                        IpcOp::Broadcast as OpCode,
-                                        buf.len() as DataLen,
-                                        &buf,
-                                        stream,
-                                    )
-                                    .unwrap()
-                                }
-                                RunOp::OnJoin(addr) => {
-                                    buf.extend(sock_addr_to_bytes(addr));
-                                    send_command(
-                                        IpcOp::OnJoin as OpCode,
-                                        buf.len() as DataLen,
-                                        &buf,
-                                        stream,
-                                    )
-                                    .unwrap()
-                                }
-                                RunOp::OnLeave(addr) => {
-                                    buf.extend(sock_addr_to_bytes(addr));
-                                    send_command(
-                                        IpcOp::OnLeave as OpCode,
-                                        buf.len() as DataLen,
-                                        &buf,
-                                        stream,
-                                    )
-                                    .unwrap()
-                                }
-
-                                RunOp::PingRes(res) => {
-                                    for (peer, ping_status, epoch_time) in res.iter() {
-                                        buf.append(&mut sock_addr_to_bytes(*peer));
-                                        buf.push(*ping_status);
-                                        buf.append(&mut epoch_time.to_be_bytes().to_vec());
-                                    }
-
-                                    send_command(
-                                        IpcOp::PingRes as OpCode,
-                                        buf.len() as DataLen,
-                                        &buf,
-                                        stream,
-                                    )
-                                    .unwrap()
-                                }
-
-                                x => panic!("Received {:?} on \'IPC out\'"),
-                            }
+                    if !peers_to_remove.is_empty() {
+                        for peer in peers_to_remove.drain(..) {
+                            clients.remove(&peer);
                         }
+                    }
 
-                        //Forward all of the incoming data on the stream to nodeIn
-                        while let Ok((opcode, datalen, data)) = recv_command(stream, false) {
-                            match IpcOp::n(opcode) {
-                                Some(IpcOp::PingReq) => {
-                                    ipc_nodein_send.send(RunOp::PingReq);
+                    for (addr, mut stream) in clients.iter_mut() {
+                        let mut buf = Vec::new();
+                        //send_command(1, 0, &vec![], stream);
+                        //Forward all of nodeOut to the each net stream
+                        loop {
+                            match ipc_nodeout_recv.try_recv() {
+                                Ok(command) => {
+                                    //Serialize the runOp and return the Result of send_command and
+                                    //see if the IPCconnection still remains open
+                                    let res = match command {
+                                        //Everything in bound should be of proper size so no need to
+                                        //resize
+                                        //Begin all the serialization garbage
+                                        RunOp::Broadcast(peer, msg) => {
+                                            let mut ip = match peer.ip() {
+                                                IpAddr::V4(ip) => ip.octets().to_vec(),
+                                                IpAddr::V6(ip) => panic!(
+                                                    "Protocol currently doesn't support ipv6 :("
+                                                ),
+                                            };
+                                            let port: u16 = peer.port();
+                                            ip.push((port >> 8) as u8);
+                                            ip.push(port as u8);
+                                            buf.extend(ip.iter());
+                                            buf.extend(msg);
+
+                                            send_command(
+                                                IpcOp::Broadcast as OpCode,
+                                                buf.len() as DataLen,
+                                                &buf,
+                                                &mut stream,
+                                            )
+                                        }
+                                        RunOp::OnJoin(addr) => {
+                                            buf.extend(sock_addr_to_bytes(addr));
+                                            send_command(
+                                                IpcOp::OnJoin as OpCode,
+                                                buf.len() as DataLen,
+                                                &buf,
+                                                &mut stream,
+                                            )
+                                        }
+                                        RunOp::OnLeave(addr) => {
+                                            buf.extend(sock_addr_to_bytes(addr));
+                                            send_command(
+                                                IpcOp::OnLeave as OpCode,
+                                                buf.len() as DataLen,
+                                                &buf,
+                                                &mut stream,
+                                            )
+                                        }
+
+                                        RunOp::PingRes(res) => {
+                                            for (peer, ping_status, epoch_time) in res.iter() {
+                                                buf.append(&mut sock_addr_to_bytes(*peer));
+                                                buf.push(*ping_status);
+                                                buf.append(&mut epoch_time.to_be_bytes().to_vec());
+                                            }
+
+                                            send_command(
+                                                IpcOp::PingRes as OpCode,
+                                                buf.len() as DataLen,
+                                                &buf,
+                                                &mut stream,
+                                            )
+                                        }
+
+                                        x => Err(std::io::Error::new(
+                                            ErrorKind::UnexpectedEof,
+                                            "Received invalid RunOp on nodeOut",
+                                        )),
+                                    };
+
+                                    match res {
+                                        Ok(()) => continue,
+                                        //If the connection is closed then schedule the client for
+                                        //removal
+                                        Err(ref e) if e.kind() == ErrorKind::WriteZero => {
+                                            println!("Ipc disconnected via write");
+                                            peers_to_remove.push(*addr);
+                                        }
+                                        Err(e) => panic!(e),
+                                    }
                                 }
-                                Some(IpcOp::Broadcast) => {
-                                    ipc_nodein_send.send(RunOp::Broadcast(
-                                        be_bytes_to_ip(&data[0..6]),
-                                        data[6..datalen as usize].to_vec(),
-                                    ));
-                                }
-                                _ => panic!("Received {:?} on \'IPC in\'"),
+                                //On an empty channel break out of the loop and try the next client
+                                Err(TryRecvError::Empty) => break,
+                                Err(e) => panic!(e),
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    panic!(e);
-                }
-            }
 
-            /*match ipc_nodeout_recv.try_recv() {
-                Ok(command) => {}
-                Err(_) => {}
-            }*/
+                    //After processing client output then handle incoming node IO
+                    for (addr, stream) in clients.iter_mut() {
+                        loop {
+                            //Forward all of the incoming data on the stream to nodeIn
+                            match recv_command(stream, false) {
+                                Ok((opcode, datalen, data)) => {
+                                    recv_command(stream, false);
+                                    match IpcOp::n(opcode) {
+                                        Some(IpcOp::PingReq) => {
+                                            ipc_nodein_send.send(RunOp::PingReq);
+                                        }
+                                        Some(IpcOp::Broadcast) => {
+                                            ipc_nodein_send.send(RunOp::Broadcast(
+                                                be_bytes_to_ip(&data[0..6]),
+                                                data[6..datalen as usize].to_vec(),
+                                            ));
+                                        }
+                                        _ => panic!("Received {:?} on \'IPC in\'"),
+                                    }
+                                }
+                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => {
+                                    println!("Ipc disconnected via read");
+                                    peers_to_remove.push(*addr);
+                                }
+                                Err(e) => panic!(e),
+                            }
+                        }
+                    }
+
+                    thread::sleep(Duration::from_millis(IPC_DELAY.try_into().unwrap()));
+                }
+                Err(e) => panic!(e),
+            }
         }
     });
 }
 
-fn be_bytes_to_ip(data: &[u8]) -> SocketAddr {
+pub fn be_bytes_to_ip(data: &[u8]) -> SocketAddr {
     //TODO: support ipv6
     let peer_data = &data[0..6];
     let port_number: u16 = ((peer_data[4] as u16) << 8) | peer_data[5] as u16;
@@ -525,9 +572,15 @@ pub fn start_accept_thread(
     mut peers: Peers,
     mut ping_status: Pings,
     mut listener: TcpListener,
+    rdy_flag: Arc<AtomicU8>,
 ) -> StoppableHandle<()> {
     return stoppable_thread::spawn(move |stopped| {
         listener.set_nonblocking(true);
+
+        //TODO: this might not actually set the thread state as rdy on rlly slow machines???
+        //Set the thread state as rdy for the node thread from which this was called
+        let flag = rdy_flag.load(Ordering::Relaxed) | 0b00000001;
+        rdy_flag.store(flag, Ordering::Relaxed);
 
         //Accept every incomming TCP connection on the main thread
         for stream in listener.incoming() {

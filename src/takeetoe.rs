@@ -84,6 +84,8 @@ fn main() -> Result<()> {
     //IP of punch server
     let mut punch_ip = "0.0.0.0:0".to_string();
 
+    let mut ipc_port = "4269".to_string();
+
     //Delay each the main event loop
     let mut delay = "0".to_string();
 
@@ -144,6 +146,12 @@ fn main() -> Result<()> {
             "The project directory to syncronize",
         );
 
+        parser.refer(&mut ipc_port).add_option(
+            &["--ipc_port"],
+            Store,
+            "The port to bind the TcpListener to for inter-process communcations",
+        );
+
         parser.parse_args_or_exit();
     }
 
@@ -152,7 +160,7 @@ fn main() -> Result<()> {
     //In the case that the node is run as a binary we can discard all of the channel handles and
     //extra data structures
     let mut main = Node::new();
-    main.start(&connecting_ip, &binding_ip, debug);
+    main.start(&connecting_ip, &binding_ip, &ipc_port, debug);
     main.wait();
 
     return Ok(());

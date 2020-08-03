@@ -1,7 +1,8 @@
 //NOTE: since the nodes use overlapping ports in the tests you need to run the test with
 //--test-threads=1
 use crate::node::NodeOut;
-use crate::threads::RunOp;
+use crate::tak_net::{recv_command, NetOp};
+use crate::threads::{be_bytes_to_ip, IpcOp, RunOp};
 use crate::Node;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
@@ -51,10 +52,11 @@ fn wait_leaves(out: &Node, leaves: usize) {
 #[test]
 fn test_2_nodes() {
     let mut n1 = Node::new();
-    n1.start("", "127.0.0.1:7070", false).unwrap();
+    n1.start("", "127.0.0.1:7070", "0", false).unwrap();
 
     let mut n2 = Node::new();
-    n2.start("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "0", false)
+        .unwrap();
 
     let n1_out = n1.output();
     let n2_out = n2.output();
@@ -87,13 +89,15 @@ fn test_2_nodes() {
 #[test]
 fn test_3_nodes() {
     let mut n1 = Node::new();
-    n1.start("", "127.0.0.1:7070", false).unwrap();
+    n1.start("", "127.0.0.1:7070", "0", false).unwrap();
 
     let mut n2 = Node::new();
-    n2.start("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "0", false)
+        .unwrap();
 
     let mut n3 = Node::new();
-    n3.start("127.0.0.1:7070", "127.0.0.1:4242", false).unwrap();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
+        .unwrap();
 
     wait_joins(&n1, 2);
     wait_joins(&n2, 2);
@@ -136,16 +140,19 @@ fn test_3_nodes() {
 #[test]
 fn test_4_nodes_stability() {
     let mut n1 = Node::new();
-    n1.start("", "127.0.0.1:7070", false).unwrap();
+    n1.start("", "127.0.0.1:7070", "0", false).unwrap();
 
     let mut n2 = Node::new();
-    n2.start("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "0", false)
+        .unwrap();
 
     let mut n3 = Node::new();
-    n3.start("127.0.0.1:9090", "127.0.0.1:4242", false).unwrap();
+    n3.start("127.0.0.1:9090", "127.0.0.1:4242", "0", false)
+        .unwrap();
 
     let mut n4 = Node::new();
-    n4.start("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
+    n4.start("127.0.0.1:4242", "127.0.0.1:5555", "0", false)
+        .unwrap();
 
     wait_joins(&n1, 3);
     wait_joins(&n2, 3);
@@ -274,19 +281,23 @@ fn test_4_nodes_stability() {
 #[test]
 fn test_5_nodes_stability() {
     let mut n1 = Node::new();
-    n1.start("", "127.0.0.1:7070", false).unwrap();
+    n1.start("", "127.0.0.1:7070", "0", false).unwrap();
 
     let mut n2 = Node::new();
-    n2.start("127.0.0.1:7070", "127.0.0.1:9090", false).unwrap();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "0", false)
+        .unwrap();
 
     let mut n3 = Node::new();
-    n3.start("127.0.0.1:9090", "127.0.0.1:4242", false).unwrap();
+    n3.start("127.0.0.1:9090", "127.0.0.1:4242", "0", false)
+        .unwrap();
 
     let mut n4 = Node::new();
-    n4.start("127.0.0.1:4242", "127.0.0.1:5555", false).unwrap();
+    n4.start("127.0.0.1:4242", "127.0.0.1:5555", "0", false)
+        .unwrap();
 
     let mut n5 = Node::new();
-    n5.start("127.0.0.1:4242", "127.0.0.1:6666", false).unwrap();
+    n5.start("127.0.0.1:4242", "127.0.0.1:6666", "0", false)
+        .unwrap();
 
     wait_joins(&n1, 4);
     wait_joins(&n2, 4);
@@ -413,7 +424,8 @@ fn test_5_nodes_stability() {
     );
 
     let mut n5 = Node::new();
-    n5.start("127.0.0.1:9090", "127.0.0.1:6969", false).unwrap();
+    n5.start("127.0.0.1:9090", "127.0.0.1:6969", "0", false)
+        .unwrap();
     wait_joins(&n1, 1);
     wait_joins(&n2, 1);
     wait_joins(&n4, 1);
@@ -477,12 +489,62 @@ fn test_5_nodes_stability() {
     n5.stop();
 }
 
-//Unit test
 #[test]
-fn test_ipc_com() {}
-#[test]
-fn test_native_com() {}
+fn test_ipc_join() {
+    //Connect to the ipc communications
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "4269", false).unwrap();
+    let mut n1_ipc = TcpStream::connect("127.0.0.1:4269").unwrap();
 
-//Stress tests on the network simulating malicious actors
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "6942", false)
+        .unwrap();
+    let mut n2_ipc = TcpStream::connect("127.0.0.1:6942").unwrap();
+
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
+        .unwrap();
+
+    //Test the ipc stream contents to make sure that all the join requests were received properly
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::OnJoin as u8);
+    assert_eq!(datalen, 6);
+    assert_eq!(
+        "127.0.0.1:9090".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data)
+    );
+
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::OnJoin as u8);
+    assert_eq!(datalen, 6);
+    assert_eq!(
+        "127.0.0.1:4242".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data)
+    );
+
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::OnJoin as u8);
+    assert_eq!(datalen, 6);
+    assert_eq!(
+        "127.0.0.1:7070".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data)
+    );
+}
+
 #[test]
-fn test_mal_invalid_args() {}
+fn test_ipc_leave() {}
+#[test]
+fn test_ipc_ping() {}
+#[test]
+fn test_ipc_broadcast() {}
+
+//The stability tests actually test the native join and leave
+//so make this a seperate unit test or no?
+#[test]
+fn test_native_join() {}
+#[test]
+fn test_nativeleave() {}
+#[test]
+fn test_native_ping() {}
+#[test]
+fn test_native_broadcast() {}

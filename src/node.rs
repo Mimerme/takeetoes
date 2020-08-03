@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Result;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
@@ -94,7 +95,13 @@ impl Node {
     }
 
     //Initialize the threads and data-structures here
-    pub fn start(&mut self, connecting_ip: &str, binding_ip: &str, debug: bool) -> Result<()> {
+    pub fn start(
+        &mut self,
+        connecting_ip: &str,
+        binding_ip: &str,
+        ipc_port: &str,
+        debug: bool,
+    ) -> Result<()> {
         info!("Starting Takeetoe node...");
 
         /* Data Structures
@@ -175,6 +182,8 @@ impl Node {
             std::sync::mpsc::channel();
         let (ipc_nodeout_send, ipc_nodeout_recv): (Sender<Command>, Receiver<Command>) =
             std::sync::mpsc::channel();
+
+        let rdy_flag = Arc::new(AtomicU8::new(0));
 
         //Calculate the current directory hash
         //let (proj_hash, file_hash) =
@@ -265,21 +274,31 @@ impl Node {
             ipc_nodein_recv,
             ret_nodeout_send,
             ipc_nodeout_send,
+            rdy_flag.clone(),
         );
-        let accept_handle =
-            threads::start_accept_thread(self.peers.clone(), self.pings.clone(), listener);
+        let accept_handle = threads::start_accept_thread(
+            self.peers.clone(),
+            self.pings.clone(),
+            listener,
+            rdy_flag.clone(),
+        );
         let ipc_handle = threads::start_ipc_thread(
-            "4269".to_string(),
+            ipc_port.to_string(),
             self.peers.clone(),
             self.pings.clone(),
             self.peer_list.clone(),
             ipc_nodein_send,
             ipc_nodeout_recv,
+            rdy_flag.clone(),
         );
 
         self.threads = Some((net_handle, accept_handle, ipc_handle));
         self.input = Some(ret_nodein_send);
         self.output = Some(ret_nodeout_recv);
+
+        while (rdy_flag.load(Ordering::Relaxed) != 7) {
+            println!("Node in rdy state!");
+        }
 
         return Ok(());
 
