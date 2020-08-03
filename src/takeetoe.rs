@@ -29,7 +29,7 @@ struct SimpleLogger;
 static LOGGER: SimpleLogger = SimpleLogger;
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        false
+        true
     }
 
     fn log(&self, record: &Record) {

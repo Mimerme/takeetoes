@@ -296,9 +296,8 @@ impl Node {
         self.input = Some(ret_nodein_send);
         self.output = Some(ret_nodeout_recv);
 
-        while (rdy_flag.load(Ordering::Relaxed) != 7) {
-            println!("Node in rdy state!");
-        }
+        //Block until all the bits on the rdy_flag have been set by the other threads
+        while (rdy_flag.load(Ordering::Relaxed) != 7) {}
 
         return Ok(());
 

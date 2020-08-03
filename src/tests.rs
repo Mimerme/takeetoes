@@ -5,6 +5,7 @@ use crate::tak_net::{recv_command, NetOp};
 use crate::threads::{be_bytes_to_ip, IpcOp, RunOp};
 use crate::Node;
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -82,6 +83,7 @@ fn test_2_nodes() {
         n2.get_state()
     );
 
+    println!("trying to stop");
     n1.stop();
     n2.stop();
 }
@@ -505,8 +507,15 @@ fn test_ipc_join() {
     n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
         .unwrap();
 
+    //let mut buf = [0 as u8; 8];
+    //n1_ipc.read_exact(&mut buf).unwrap();
+    //println!("net buf: {:?}", buf);
+
     //Test the ipc stream contents to make sure that all the join requests were received properly
     let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+
+    //println!("node 1 started");
+    //println!("{:?} {:?} {:?}", opcode, datalen, data);
     assert_eq!(opcode, IpcOp::OnJoin as u8);
     assert_eq!(datalen, 6);
     assert_eq!(
@@ -529,6 +538,18 @@ fn test_ipc_join() {
         "127.0.0.1:7070".parse::<SocketAddr>().unwrap(),
         be_bytes_to_ip(&data)
     );
+
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::OnJoin as u8);
+    assert_eq!(datalen, 6);
+    assert_eq!(
+        "127.0.0.1:4242".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data)
+    );
+
+    n1.stop();
+    n2.stop();
+    n3.stop();
 }
 
 #[test]
@@ -548,3 +569,13 @@ fn test_nativeleave() {}
 fn test_native_ping() {}
 #[test]
 fn test_native_broadcast() {}
+
+#[test]
+fn test_n1() {
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "4269", false).unwrap();
+
+    let mut n1_ipc = TcpStream::connect("127.0.0.1:4269").unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    loop {}
+}
