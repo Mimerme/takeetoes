@@ -83,7 +83,6 @@ fn test_2_nodes() {
         n2.get_state()
     );
 
-    println!("trying to stop");
     n1.stop();
     n2.stop();
 }

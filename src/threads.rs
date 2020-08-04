@@ -2,7 +2,7 @@
 //NOTE: if you're looking for the debug thread it's in the main function
 //
 use crate::tak_net::{recv_command, send_command, DataLen, NetOp, OpCode};
-use crate::{PeerList, Peers, Pings};
+use crate::{Node, PeerList, Peers, Pings};
 use enumn::N;
 use log::{debug, error, info};
 use std::cmp::PartialEq;
@@ -92,7 +92,7 @@ pub fn start_network_thread(
         let flag = rdy_flag.load(Ordering::Relaxed) | 0b00000100;
         rdy_flag.store(flag, Ordering::Relaxed);
 
-        while !stopped.get() {
+        while !stopped.get() && rdy_flag.load(Ordering::Relaxed) != 0b11111111 {
             let mut peer_index = 0;
 
             //Remove the peers before we obtain the lock and result in a deadlock
@@ -407,10 +407,14 @@ pub fn start_ipc_thread(
         rdy_flag.store(flag, Ordering::Relaxed);
         //Handle the first incomming connection
         //setup this closure so that we can stop the thread from the outside
+
+        let rdy_flag_clone = rdy_flag.clone();
         let stopptable_accept = move || -> Option<TcpStream> {
-            while !stopped.get() {
+            while !stopped.get() && rdy_flag_clone.load(Ordering::Relaxed) != 0b11111111 {
                 match ipc_listener.accept() {
-                    Ok((stream, addr)) => return Some(stream),
+                    Ok((stream, addr)) => {
+                        return Some(stream);
+                    }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
                     Err(e) => panic!(e),
                 }
@@ -422,7 +426,7 @@ pub fn start_ipc_thread(
             None => return,
         };
 
-        while !stopped.get() {
+        while !stopped.get() && rdy_flag.load(Ordering::Relaxed) != 0b11111111 {
             //stream.write(b"obama");
 
             //stream.set_nonblocking(true);
@@ -491,7 +495,6 @@ pub fn start_ipc_thread(
                                     &mut stream,
                                 )
                             }
-
                             x => Err(std::io::Error::new(
                                 ErrorKind::UnexpectedEof,
                                 "Received invalid RunOp on nodeOut",
@@ -503,7 +506,9 @@ pub fn start_ipc_thread(
                             //If the connection is closed then schedule the client for
                             //removal
                             Err(ref e) if e.kind() == ErrorKind::WriteZero => {
-                                println!("Ipc disconnected via write");
+                                println!("Ipc disconnected via write. Stopping node");
+                                rdy_flag.store(0b11111111, Ordering::Relaxed);
+                                return;
                             }
                             Err(e) => panic!(e),
                         }
@@ -521,6 +526,7 @@ pub fn start_ipc_thread(
                 match recv_command(&mut stream, false) {
                     Ok((opcode, datalen, data)) => {
                         recv_command(&mut stream, false);
+                        //IPCs can only used 2 opcodes
                         match IpcOp::n(opcode) {
                             Some(IpcOp::PingReq) => {
                                 ipc_nodein_send.send(RunOp::PingReq);
@@ -536,7 +542,9 @@ pub fn start_ipc_thread(
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => {
-                        println!("Ipc disconnected via read");
+                        println!("Ipc disconnected via read. Stopping node");
+                        rdy_flag.store(0b11111111, Ordering::Relaxed);
+                        return;
                     }
                     Err(e) => panic!(e),
                 }
@@ -598,7 +606,7 @@ pub fn start_accept_thread(
                     );
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if stopped.get() {
+                    if stopped.get() || rdy_flag.load(Ordering::Relaxed) == 0b11111111 {
                         return;
                     }
                     thread::sleep(Duration::from_millis(ACCEPT_DELAY.try_into().unwrap()));
