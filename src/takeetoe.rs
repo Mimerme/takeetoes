@@ -1,6 +1,7 @@
 #![allow(warnings)]
 
 extern crate argparse;
+use crate::node::{PeerList, Peers, Pings};
 use crate::threads::RunOp;
 use argparse::{ArgumentParser, Store, StoreFalse, StoreOption, StoreTrue};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -51,20 +52,6 @@ impl log::Log for SimpleLogger {
 pub fn init_logger() -> std::result::Result<(), SetLoggerError> {
     log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Debug))
 }
-
-/*
- * JUST A HEADS UP
- * ===============
- * 'Peers' is a maping of the host-to-peer-addr to IN and OUT streams to a peer
- * 'PeerList' is a maping of the host-to-peer-addr to its net_address
- * They are very similar, and although they are often modified together, they are technically
- * independent
- * This is because Peers can connect to the network before they advertise their address
- * TODO: make this official. call them 'leechers'
- */
-pub type Peers = Arc<RwLock<HashMap<SocketAddr, (Mutex<TcpStream>, Mutex<TcpStream>)>>>;
-pub type PeerList = Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>;
-pub type Pings = Arc<RwLock<HashMap<SocketAddr, (u8, SystemTime)>>>;
 
 //use net::{recv_command, send_command};
 

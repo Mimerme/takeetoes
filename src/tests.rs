@@ -5,7 +5,7 @@ use crate::tak_net::{recv_command, NetOp};
 use crate::threads::{be_bytes_to_ip, IpcOp, RunOp};
 use crate::Node;
 use std::collections::BTreeSet;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -552,9 +552,99 @@ fn test_ipc_join() {
 }
 
 #[test]
-fn test_ipc_leave() {}
+fn test_ipc_leave() {
+    //Connect to the ipc communications
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "4269", false).unwrap();
+    let mut n1_ipc = TcpStream::connect("127.0.0.1:4269").unwrap();
+
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "6942", false)
+        .unwrap();
+    let mut n2_ipc = TcpStream::connect("127.0.0.1:6942").unwrap();
+
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
+        .unwrap();
+
+    //Go through the join commands
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+
+    n1.stop();
+
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::OnLeave as u8);
+    assert_eq!(datalen, 6);
+    assert_eq!(
+        "127.0.0.1:7070".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data)
+    );
+
+    n3.stop();
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::OnLeave as u8);
+    assert_eq!(datalen, 6);
+    assert_eq!(
+        "127.0.0.1:4242".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data)
+    );
+
+    n2.stop();
+}
 #[test]
-fn test_ipc_ping() {}
+fn test_ipc_ping() {
+    //Connect to the ipc communications
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "4269", false).unwrap();
+    let mut n1_ipc = TcpStream::connect("127.0.0.1:4269").unwrap();
+
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "6942", false)
+        .unwrap();
+    let mut n2_ipc = TcpStream::connect("127.0.0.1:6942").unwrap();
+
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
+        .unwrap();
+
+    //Go through the join commands
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+
+    //Request for the ping table
+    n1_ipc.write(&vec![1, 0]);
+
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::PingRes as u8);
+    assert_eq!(datalen, 30);
+    assert_eq!(
+        "127.0.0.1:9090".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data[0..6])
+    );
+    assert_eq!(
+        "127.0.0.1:4242".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data[15..21])
+    );
+
+    n1.stop();
+    n2_ipc.write(&vec![1, 0]);
+
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::PingRes as u8);
+    assert_eq!(datalen, 15);
+    assert_eq!(
+        "127.0.0.1:4242".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data[0..6])
+    );
+
+    n2.stop();
+    n3.stop();
+}
 #[test]
 fn test_ipc_broadcast() {}
 
@@ -568,13 +658,3 @@ fn test_nativeleave() {}
 fn test_native_ping() {}
 #[test]
 fn test_native_broadcast() {}
-
-#[test]
-fn test_n1() {
-    let mut n1 = Node::new();
-    n1.start("", "127.0.0.1:7070", "4269", false).unwrap();
-
-    let mut n1_ipc = TcpStream::connect("127.0.0.1:4269").unwrap();
-    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
-    loop {}
-}

@@ -4,7 +4,7 @@ use crate::threads;
 use crate::threads::{Command, RunOp};
 use log::{debug, error, info};
 use std::collections::BTreeSet;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io::Result;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::str::FromStr;
@@ -24,9 +24,9 @@ use stoppable_thread::StoppableHandle;
  * This is because Peers can connect to the network before they advertise their address
  * TODO: make this official. call them 'leechers'
  */
-pub type Peers = Arc<RwLock<HashMap<SocketAddr, (Mutex<TcpStream>, Mutex<TcpStream>)>>>;
-pub type PeerList = Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>;
-pub type Pings = Arc<RwLock<HashMap<SocketAddr, (u8, SystemTime)>>>;
+pub type Peers = Arc<RwLock<BTreeMap<SocketAddr, (Mutex<TcpStream>, Mutex<TcpStream>)>>>;
+pub type PeerList = Arc<RwLock<BTreeMap<SocketAddr, SocketAddr>>>;
+pub type Pings = Arc<RwLock<BTreeMap<SocketAddr, (u8, SystemTime)>>>;
 pub type NodeHandles = (
     StoppableHandle<()>,
     StoppableHandle<()>,
@@ -49,9 +49,9 @@ pub struct Node {
 impl Node {
     pub fn new() -> Node {
         return Node {
-            peers: Arc::new(RwLock::new(HashMap::new())),
-            peer_list: Arc::new(RwLock::new(HashMap::new())),
-            pings: Arc::new(RwLock::new(HashMap::new())),
+            peers: Arc::new(RwLock::new(BTreeMap::new())),
+            peer_list: Arc::new(RwLock::new(BTreeMap::new())),
+            pings: Arc::new(RwLock::new(BTreeMap::new())),
             threads: None,
             input: None,
             output: None,

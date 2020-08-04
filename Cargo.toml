@@ -13,6 +13,7 @@ log = "0.4.11"
 enumn = "0.1.3"
 stoppable_thread = "0.2.1"
 #stoppable_thread = {version="0.2.1", path="/home/mimerme/.cargo/registry/src/github.com-1ecc6299db9ec823/stoppable_thread-0.2.1/"}
+igd = "0.11.1"
 
 
 # For observing filesystem events

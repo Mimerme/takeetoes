@@ -1,8 +1,8 @@
 //functions to spawn all the threads needed by the node
 //NOTE: if you're looking for the debug thread it's in the main function
 //
+use crate::node::{PeerList, Peers, Pings};
 use crate::tak_net::{recv_command, send_command, DataLen, NetOp, OpCode};
-use crate::{Node, PeerList, Peers, Pings};
 use enumn::N;
 use log::{debug, error, info};
 use std::cmp::PartialEq;
@@ -99,9 +99,6 @@ pub fn start_network_thread(
             if !peers_to_remove.is_empty() {
                 for peer in peers_to_remove.drain(..) {
                     peers.write().unwrap().remove(&peer);
-
-                    ret_nodeout_send.send(RunOp::OnLeave(peer.clone()));
-                    ipc_nodeout_send.send(RunOp::OnLeave(peer.clone()));
                 }
             }
 
@@ -241,12 +238,18 @@ pub fn start_network_thread(
                         debug!("Peer has disconnected!");
                         let host_sock = recv.peer_addr().unwrap();
 
-                        peer_list.write().unwrap().remove(&host_sock);
+                        let mut peer_list = peer_list.write().unwrap();
+
+                        ret_nodeout_send.send(RunOp::OnLeave(*peer_list.get(&host_sock).unwrap()));
+                        ipc_nodeout_send.send(RunOp::OnLeave(*peer_list.get(&host_sock).unwrap()));
+
+                        peer_list.remove(&host_sock);
 
                         //NOTE: the bellow Results in a deadlock
                         //peers.write().unwrap().remove(&host_sock);
                         ping_status.write().unwrap().remove(&host_sock);
 
+                        //Schedule peers to be removed at the top of the event loop
                         peers_to_remove.push(host_sock);
                     }
                     Err(e) => {
