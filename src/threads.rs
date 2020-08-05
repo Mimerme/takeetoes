@@ -35,7 +35,8 @@ const IPC_DELAY: usize = 250;
 pub enum RunOp {
     PingReq,
     PingRes(Vec<(SocketAddr, u8, u64)>),
-    Broadcast(SocketAddr, Vec<u8>),
+    BroadcastSend(Vec<u8>),
+    BroadcastRecv(SocketAddr, Vec<u8>),
     OnJoin(SocketAddr),
     OnLeave(SocketAddr),
 }
@@ -225,8 +226,9 @@ pub fn start_network_thread(
                                 let peer_addr = peer_list.get(&peer_addr).unwrap();
 
                                 debug!("Network BROADCAST received!");
-                                ret_nodeout_send.send(RunOp::Broadcast(*peer_addr, data.clone()));
-                                ipc_nodeout_send.send(RunOp::Broadcast(*peer_addr, data));
+                                ret_nodeout_send
+                                    .send(RunOp::BroadcastRecv(*peer_addr, data.clone()));
+                                ipc_nodeout_send.send(RunOp::BroadcastRecv(*peer_addr, data));
                             }
                             _ => {
                                 println!("??? Unknown OpCode ???: ({:?}, Length: {:?})", data, len);
@@ -328,7 +330,7 @@ pub fn start_network_thread(
                     }
                     ipc_nodeout_send.send(RunOp::PingRes(data));
                 }
-                Ok(RunOp::Broadcast(peer, data)) => {
+                Ok(RunOp::BroadcastSend(data)) => {
                     for (_, (read, write)) in peers.read().unwrap().iter() {
                         send_command(
                             NetOp::Broadcast as u8,
@@ -363,7 +365,7 @@ pub fn start_network_thread(
                     }
                     ret_nodeout_send.send(RunOp::PingRes(data));
                 }
-                Ok(RunOp::Broadcast(peer, data)) => {
+                Ok(RunOp::BroadcastSend(data)) => {
                     for (_, (read, write)) in peers.read().unwrap().iter() {
                         send_command(
                             NetOp::Broadcast as u8,
@@ -445,7 +447,7 @@ pub fn start_ipc_thread(
                             //Everything in bound should be of proper size so no need to
                             //resize
                             //Begin all the serialization garbage
-                            RunOp::Broadcast(peer, msg) => {
+                            RunOp::BroadcastRecv(peer, msg) => {
                                 let mut ip = match peer.ip() {
                                     IpAddr::V4(ip) => ip.octets().to_vec(),
                                     IpAddr::V6(ip) => {
@@ -535,10 +537,7 @@ pub fn start_ipc_thread(
                                 ipc_nodein_send.send(RunOp::PingReq);
                             }
                             Some(IpcOp::Broadcast) => {
-                                ipc_nodein_send.send(RunOp::Broadcast(
-                                    be_bytes_to_ip(&data[0..6]),
-                                    data[6..datalen as usize].to_vec(),
-                                ));
+                                ipc_nodein_send.send(RunOp::BroadcastSend(data));
                             }
                             _ => panic!("Received {:?} on \'IPC in\'"),
                         }

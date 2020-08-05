@@ -2,7 +2,7 @@
 //--test-threads=1
 use crate::node::NodeOut;
 use crate::tak_net::{recv_command, NetOp};
-use crate::threads::{be_bytes_to_ip, IpcOp, RunOp};
+use crate::threads::{be_bytes_to_ip, sock_addr_to_bytes, IpcOp, RunOp};
 use crate::Node;
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
@@ -646,7 +646,81 @@ fn test_ipc_ping() {
     n3.stop();
 }
 #[test]
-fn test_ipc_broadcast() {}
+fn test_ipc_broadcast() {
+    //Connect to the ipc communications
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "4269", false).unwrap();
+    let mut n1_ipc = TcpStream::connect("127.0.0.1:4269").unwrap();
+
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "6942", false)
+        .unwrap();
+    let mut n2_ipc = TcpStream::connect("127.0.0.1:6942").unwrap();
+
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "4444", false)
+        .unwrap();
+    let mut n3_ipc = TcpStream::connect("127.0.0.1:4444").unwrap();
+
+    //Go through the join commands
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n3_ipc, true).unwrap();
+    let (opcode, datalen, data) = recv_command(&mut n3_ipc, true).unwrap();
+
+    //Send a broadcast
+    let mut command = vec![3, 5];
+    command.extend(b"obama");
+    n1_ipc.write(&command);
+
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::Broadcast as u8);
+    assert_eq!(datalen, 11);
+    assert_eq!(
+        "127.0.0.1:7070".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data[0..6])
+    );
+    assert_eq!(b"obama".to_vec(), data[6..11].to_vec());
+
+    let (opcode, datalen, data) = recv_command(&mut n3_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::Broadcast as u8);
+    assert_eq!(datalen, 11);
+    assert_eq!(
+        "127.0.0.1:7070".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data[0..6])
+    );
+    assert_eq!(b"obama".to_vec(), data[6..11].to_vec());
+
+    let mut command = vec![3, 7];
+    command.extend(b"blaster");
+    n3_ipc.write(&command);
+
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+
+    assert_eq!(opcode, IpcOp::Broadcast as u8);
+    assert_eq!(datalen, 13);
+    println!("{:?}", data);
+    assert_eq!(
+        "127.0.0.1:4242".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data[0..6])
+    );
+    assert_eq!(b"blaster".to_vec(), data[6..13].to_vec());
+
+    let (opcode, datalen, data) = recv_command(&mut n1_ipc, true).unwrap();
+    assert_eq!(opcode, IpcOp::Broadcast as u8);
+    assert_eq!(datalen, 13);
+    assert_eq!(
+        "127.0.0.1:4242".parse::<SocketAddr>().unwrap(),
+        be_bytes_to_ip(&data[0..6])
+    );
+    assert_eq!(b"blaster".to_vec(), data[6..13].to_vec());
+
+    n1.stop();
+    n2.stop();
+    n3.stop();
+}
 
 //The stability tests actually test the native join and leave
 //so make this a seperate unit test or no?
