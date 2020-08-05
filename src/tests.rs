@@ -632,6 +632,9 @@ fn test_ipc_ping() {
     );
 
     n1.stop();
+    //First wait for the leave command
+    let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
+    //Then write
     n2_ipc.write(&vec![1, 0]);
 
     let (opcode, datalen, data) = recv_command(&mut n2_ipc, true).unwrap();
