@@ -96,10 +96,18 @@ pub fn start_network_thread(
         while !stopped.get() && rdy_flag.load(Ordering::Relaxed) != 0b11111111 {
             let mut peer_index = 0;
 
-            //Remove the peers before we obtain the lock and result in a deadlock
+            //Remove the peers scheduled for removal
             if !peers_to_remove.is_empty() {
                 for peer in peers_to_remove.drain(..) {
+                    let mut peer_list = peer_list.write().unwrap();
+                    let net_addr = peer_list.get(&peer).unwrap().clone();
+                    //Remove the peers
                     peers.write().unwrap().remove(&peer);
+
+                    peer_list.remove(&peer);
+                    //Send the OnLeave event to nodeOut
+                    ret_nodeout_send.send(RunOp::OnLeave(net_addr));
+                    ipc_nodeout_send.send(RunOp::OnLeave(net_addr));
                 }
             }
 
@@ -241,11 +249,6 @@ pub fn start_network_thread(
                         let host_sock = recv.peer_addr().unwrap();
 
                         let mut peer_list = peer_list.write().unwrap();
-
-                        ret_nodeout_send.send(RunOp::OnLeave(*peer_list.get(&host_sock).unwrap()));
-                        ipc_nodeout_send.send(RunOp::OnLeave(*peer_list.get(&host_sock).unwrap()));
-
-                        peer_list.remove(&host_sock);
 
                         //NOTE: the bellow Results in a deadlock
                         //peers.write().unwrap().remove(&host_sock);

@@ -216,7 +216,7 @@ fn test_4_nodes_stability() {
     wait_leaves(&n1, 1);
     wait_leaves(&n2, 1);
     wait_leaves(&n4, 1);
-
+    thread::sleep(Duration::from_secs(1));
     assert_eq!(
         NodeState {
             peer_list: vec!["127.0.0.1:5555".to_string(), "127.0.0.1:9090".to_string()],
@@ -701,7 +701,6 @@ fn test_ipc_broadcast() {
 
     assert_eq!(opcode, IpcOp::Broadcast as u8);
     assert_eq!(datalen, 13);
-    println!("{:?}", data);
     assert_eq!(
         "127.0.0.1:4242".parse::<SocketAddr>().unwrap(),
         be_bytes_to_ip(&data[0..6])
