@@ -727,10 +727,213 @@ fn test_ipc_broadcast() {
 //The stability tests actually test the native join and leave
 //so make this a seperate unit test or no?
 #[test]
-fn test_native_join() {}
+fn test_native_join() {
+    //Connect to the ipc communications
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "0", false).unwrap();
+
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "0", false)
+        .unwrap();
+
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
+        .unwrap();
+
+    //let mut buf = [0 as u8; 8];
+    //n1_ipc.read_exact(&mut buf).unwrap();
+    //println!("net buf: {:?}", buf);
+
+    let n1_out = n1.output();
+    let n2_out = n2.output();
+    let n3_out = n3.output();
+
+    assert_eq!(
+        RunOp::OnJoin("127.0.0.1:9090".parse::<SocketAddr>().unwrap()),
+        n1_out.recv().unwrap()
+    );
+    assert_eq!(
+        RunOp::OnJoin("127.0.0.1:4242".parse::<SocketAddr>().unwrap()),
+        n1_out.recv().unwrap()
+    );
+
+    assert_eq!(
+        RunOp::OnJoin("127.0.0.1:7070".parse::<SocketAddr>().unwrap()),
+        n2_out.recv().unwrap()
+    );
+    assert_eq!(
+        RunOp::OnJoin("127.0.0.1:4242".parse::<SocketAddr>().unwrap()),
+        n2_out.recv().unwrap()
+    );
+
+    assert_eq!(
+        RunOp::OnJoin("127.0.0.1:7070".parse::<SocketAddr>().unwrap()),
+        n3_out.recv().unwrap()
+    );
+    assert_eq!(
+        RunOp::OnJoin("127.0.0.1:9090".parse::<SocketAddr>().unwrap()),
+        n3_out.recv().unwrap()
+    );
+
+    n1.stop();
+    n2.stop();
+    n3.stop();
+}
 #[test]
-fn test_nativeleave() {}
+fn test_native_leave() {
+    //Connect to the ipc communications
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "0", false).unwrap();
+
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "0", false)
+        .unwrap();
+
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
+        .unwrap();
+
+    let n1_out = n1.output();
+    let n2_out = n2.output();
+    let n3_out = n3.output();
+
+    //Discard the join receives
+    n1_out.recv();
+    n1_out.recv();
+
+    n2_out.recv();
+    n2_out.recv();
+
+    n3_out.recv();
+    n3_out.recv();
+
+    n1.stop();
+
+    assert_eq!(
+        RunOp::OnLeave("127.0.0.1:7070".parse().unwrap()),
+        n2_out.recv().unwrap()
+    );
+    assert_eq!(
+        RunOp::OnLeave("127.0.0.1:7070".parse().unwrap()),
+        n3_out.recv().unwrap()
+    );
+
+    n3.stop();
+
+    assert_eq!(
+        RunOp::OnLeave("127.0.0.1:4242".parse().unwrap()),
+        n2_out.recv().unwrap()
+    );
+
+    n2.stop();
+}
 #[test]
-fn test_native_ping() {}
+fn test_native_ping() {
+    //Connect to the ipc communications
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "0", false).unwrap();
+
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "0", false)
+        .unwrap();
+
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
+        .unwrap();
+
+    let n1_out = n1.output();
+    let n2_out = n2.output();
+    let n3_out = n3.output();
+    let n1_in = n1.input();
+    let n2_in = n2.input();
+    let n3_in = n3.input();
+
+    //Discard the join receives
+    n1_out.recv();
+    n1_out.recv();
+
+    n2_out.recv();
+    n2_out.recv();
+
+    n3_out.recv();
+    n3_out.recv();
+
+    //Request for the ping table
+    n1_in.send(RunOp::PingReq);
+
+    if let Ok(RunOp::PingRes(vec)) = n1_out.recv() {
+        assert_eq!(vec.len(), 2);
+    } else {
+        assert!(false);
+    }
+
+    n1.stop();
+    n2_out.recv();
+    n2_in.send(RunOp::PingReq);
+
+    if let Ok(RunOp::PingRes(vec)) = n2_out.recv() {
+        assert_eq!(vec.len(), 1);
+    } else {
+        assert!(false);
+    }
+
+    n2.stop();
+    n3.stop();
+}
 #[test]
-fn test_native_broadcast() {}
+fn test_native_broadcast() {
+    //Connect to the ipc communications
+    let mut n1 = Node::new();
+    n1.start("", "127.0.0.1:7070", "0", false).unwrap();
+
+    let mut n2 = Node::new();
+    n2.start("127.0.0.1:7070", "127.0.0.1:9090", "0", false)
+        .unwrap();
+
+    let mut n3 = Node::new();
+    n3.start("127.0.0.1:7070", "127.0.0.1:4242", "0", false)
+        .unwrap();
+
+    let n1_out = n1.output();
+    let n2_out = n2.output();
+    let n3_out = n3.output();
+    let n1_in = n1.input();
+    let n2_in = n2.input();
+    let n3_in = n3.input();
+
+    //Discard the join receives
+    n1_out.recv();
+    n1_out.recv();
+
+    n2_out.recv();
+    n2_out.recv();
+
+    n3_out.recv();
+    n3_out.recv();
+
+    //Send a broadcast
+    n1_in.send(RunOp::BroadcastSend(b"obama".to_vec()));
+
+    assert_eq!(
+        RunOp::BroadcastRecv("127.0.0.1:7070".parse().unwrap(), b"obama".to_vec()),
+        n3_out.recv().unwrap()
+    );
+    assert_eq!(
+        RunOp::BroadcastRecv("127.0.0.1:7070".parse().unwrap(), b"obama".to_vec()),
+        n2_out.recv().unwrap()
+    );
+
+    n3_in.send(RunOp::BroadcastSend(b"blaster".to_vec()));
+    assert_eq!(
+        RunOp::BroadcastRecv("127.0.0.1:4242".parse().unwrap(), b"blaster".to_vec()),
+        n2_out.recv().unwrap()
+    );
+    assert_eq!(
+        RunOp::BroadcastRecv("127.0.0.1:4242".parse().unwrap(), b"blaster".to_vec()),
+        n1_out.recv().unwrap()
+    );
+
+    n1.stop();
+    n2.stop();
+    n3.stop();
+}
